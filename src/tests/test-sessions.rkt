@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require rackunit
+         web-server/http/cookie-parse
          "../sessions.rkt"
          "test-helpers.rkt")
 
@@ -25,21 +26,19 @@
   (destroy-session! key)
   (check-false (lookup-session/touch! key)))
 
-(test-case "session expiry"
+(test-case "session expiry via expire-sessions!"
+  ;; Create a session, then replace it in the store with an expired copy
   (define key (create-session! "test@example.com" "secret"))
   (define s (lookup-session key))
   (check-pred session? s)
-  ;; Mutate the expiry to the past (prefab struct allows struct-copy)
+  ;; Prefab structs allow struct-copy; set expiry to the past
   (define expired (struct-copy session s [expiry 0]))
-  ;; Replace the session in the store with the expired version
-  ;; by destroying and re-inserting
-  (destroy-session! key)
-  ;; Directly test that expired sessions don't survive lookup
-  ;; (since the session store is a hash we can't easily re-insert with same key,
-  ;; but we can verify that creating a session and letting it expire works)
-  ;; Create a fresh one and verify it's alive
-  (define key2 (create-session! "test2@example.com" "secret"))
-  (check-pred session? (lookup-session/touch! key2)))
+  ;; Overwrite the live session with the expired one directly in the store
+  (hash-set! (sessions) key expired)
+  (check-pred session? (lookup-session key)) ; still there before expiry sweep
+  ;; Now run expiry - should remove the expired session
+  (expire-sessions!)
+  (check-false (lookup-session key)))
 
 (test-case "current-email returns session email when parameterized"
   (define key (create-session! "user@example.com" "pass"))
@@ -62,12 +61,17 @@
   (check-false (session-curator? s2))
   (check-false (session-superuser? s2)))
 
-(test-case "request->session extracts session from cookie header"
+(test-case "cookie round-trip: extract session key from request cookies"
   (define key (create-session! "cookie@example.com" "pass"))
   (define req (make-test-request #:cookies (list (cons "pltsession" key))))
-  ;; request->session is in site.rkt which we can't easily require,
-  ;; so test the cookie round-trip via lookup-session/touch! directly
-  (check-pred session? (lookup-session/touch! key)))
+  ;; Extract the session key from the request the same way site.rkt does
+  (define session-cookies
+    (filter (lambda (c) (equal? (client-cookie-name c) "pltsession"))
+            (request-cookies req)))
+  (check-equal? (length session-cookies) 1)
+  (define extracted-key (client-cookie-value (car session-cookies)))
+  (check-equal? extracted-key key)
+  (check-pred session? (lookup-session/touch! extracted-key)))
 
 (test-case "with-test-session helper works"
   (with-test-session "helper@example.com"

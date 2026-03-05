@@ -7,7 +7,9 @@
          create-session!
          destroy-session!
          lookup-session/touch!
-         lookup-session)
+         lookup-session
+         expire-sessions!
+         sessions)
 
 (require "randomness.rkt")
 (require "config.rkt")
