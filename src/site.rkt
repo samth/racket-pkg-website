@@ -382,6 +382,7 @@
                             ,(form-group 4 5 (primary-button "Log in"))))))))
 
 (define (create-session-after-authentication-success! email)
+  (ensure-user-id! email)
   (create-session! email
                    #:curator? (and (curation-administrator? email) #t)
                    #:superuser? (and (superuser? email) #t)))
