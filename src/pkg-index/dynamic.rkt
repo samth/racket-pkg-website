@@ -1,6 +1,13 @@
 #lang racket/base
 
-(provide go)
+(provide go
+         curation-administrator?
+         superuser?
+         current-user
+         save-package!
+         curate-packages!
+         package-author?
+         ensure-authenticate/email+passwd)
 
 (require file/sha1
          json

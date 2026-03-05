@@ -168,5 +168,12 @@
   (when beat-s3-bucket
     (beat beat-s3-bucket task)))
 
+;; For testing: override state for test isolation
+(define (set-pkgs-path-for-testing! path)
+  (set! pkgs-path (if (path? path) (path->string path) path)))
+
+(define (set-userdb-for-testing! db)
+  (set! userdb db))
+
 (provide (all-defined-out))
 (provide (all-from-out "config.rkt"))
