@@ -500,31 +500,45 @@
 (define (github-callback-url)
   (string-append dynamic-urlprefix "/auth/github/callback"))
 
+;; Render the email+password login page (with an error banner) from an OAuth
+;; error path. Wraps login-form in login-or-register-flow* so a successful
+;; fallback submission still produces a proper response + signed session cookie
+;; instead of leaking the raw session-key string.
+(define (github-login-error message)
+  (login-or-register-flow* (named-url main-page)
+                           (lambda () (login-form message))))
+
 (define (github-login-start request)
   (if (not (github-oauth-configured?))
-      (login-form "GitHub login is not configured.")
+      (github-login-error "GitHub login is not configured.")
       (redirect-to (github-authorize-url (github-callback-url)))))
 
 (define (github-login-callback request)
   (define bindings (request-bindings request))
-  (define code (extract-binding/single 'code bindings))
-  (define state (extract-binding/single 'state bindings))
+  (define code
+    (with-handlers ([exn:fail? (lambda (_) #f)])
+      (extract-binding/single 'code bindings)))
+  (define state
+    (with-handlers ([exn:fail? (lambda (_) #f)])
+      (extract-binding/single 'state bindings)))
   (cond
+    [(not code)
+     (github-login-error "GitHub login was cancelled or failed.")]
     [(not (validate-csrf-state! state))
-     (login-form "Invalid or expired GitHub login request. Please try again.")]
+     (github-login-error "Invalid or expired GitHub login request. Please try again.")]
     [else
      (define access-token (github-exchange-code code (github-callback-url)))
      (cond
        [(not access-token)
-        (login-form "GitHub login failed. Please try again.")]
+        (github-login-error "GitHub login failed. Please try again.")]
        [else
         (define-values (github-id github-username verified-emails)
           (github-get-user-info access-token))
         (cond
           [(not github-id)
-           (login-form "Could not retrieve your GitHub account information.")]
+           (github-login-error "Could not retrieve your GitHub account information.")]
           [(null? verified-emails)
-           (login-form "No verified email found on your GitHub account. Please verify an email on GitHub first.")]
+           (github-login-error "No verified email found on your GitHub account. Please verify an email on GitHub first.")]
           [else
            (github-login-complete! github-id github-username verified-emails)])])]))
 
