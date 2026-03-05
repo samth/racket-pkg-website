@@ -95,6 +95,7 @@
    [("search") search-page]
    [("package" (string-arg)) package-page]
    [("package" (string-arg) "edit") edit-package-page]
+   [("account") account-page]
    [("update-my-packages") update-my-packages-page]
    [("update-package-ring" (string-arg) (integer-arg)) #:method "post" update-package-ring-page]
    [("not-found") not-found-page]
@@ -231,6 +232,8 @@
                                      " "
                                      (span ((class "caret"))))
                                   (ul ((class "dropdown-menu") (role "menu"))
+                                      (li (a ((href ,(named-url account-page)))
+                                             ,(glyphicon 'cog) " Account"))
                                       (li (a ((href ,(named-url update-my-packages-page)))
                                              ,(glyphicon 'refresh) " Rescan all my packages"))
                                       (li ((class "divider")))
@@ -384,6 +387,67 @@
   (create-session! email
                    #:curator? (and (curation-administrator? email) #t)
                    #:superuser? (and (superuser? email) #t)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (account-page request)
+  (authentication-wrap/require-login
+   #:request request
+   (account-form)))
+
+(define (account-form [message #f] [message-class "alert-success"])
+  (define email (current-email))
+  (define user-id (user-id-for-email email))
+  (with-site-config
+   (send/suspend/dispatch/dynamic
+    (lambda (embed-url)
+      (bootstrap-response
+       "Account Settings"
+       `(div
+         ,@(maybe-splice
+            message
+            `(div ((class ,(string-append "alert " message-class)))
+              (p ,message)))
+         (div ((class "panel panel-default"))
+              (div ((class "panel-heading")) (h3 ((class "panel-title")) "Account Information"))
+              (div ((class "panel-body"))
+                   (dl ((class "dl-horizontal"))
+                       (dt "Email") (dd ,email)
+                       ,@(if user-id
+                             `((dt "User ID") (dd (code ,user-id)))
+                             '()))))
+         (div ((class "panel panel-default"))
+              (div ((class "panel-heading")) (h3 ((class "panel-title")) "Change Password"))
+              (div ((class "panel-body"))
+                   (form ((class "form-horizontal")
+                          (method "post")
+                          (action ,(embed-url process-password-change))
+                          (role "form"))
+                         ,(form-group 2 3 (label "current_password" "Current password")
+                                      0 5 (password-input "current_password"))
+                         ,(form-group 2 3 (label "new_password" "New password")
+                                      0 5 (password-input "new_password"))
+                         ,(form-group 2 3 (label "confirm_password" "Confirm new password")
+                                      0 5 (password-input "confirm_password"))
+                         ,(form-group 5 5 (primary-button "Change Password")))))))))))
+
+(define (process-password-change request)
+  (define-form-bindings/trim request (current_password new_password confirm_password))
+  (define email (current-email))
+  (cond
+    [(equal? current_password "")
+     (account-form "Please enter your current password." "alert-danger")]
+    [(equal? new_password "")
+     (account-form "Please enter a new password." "alert-danger")]
+    [(not (equal? new_password confirm_password))
+     (account-form "New passwords do not match." "alert-danger")]
+    [(not (login-password-correct? email current_password))
+     (account-form "Current password is incorrect." "alert-danger")]
+    [else
+     (register-or-update-user! email new_password)
+     (account-form "Password changed successfully.")]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define (process-login-credentials request)
   (define-form-bindings/trim request (email password))

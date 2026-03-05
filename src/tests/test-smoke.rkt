@@ -137,3 +137,14 @@
   ;; Should render (maybe 200 with "not found" content, or 404)
   (check-not-false (member (response-status-code resp) '(200 404)))
   (response-close! resp))
+
+(test-case "smoke: GET /account without login redirects to login"
+  (define resp (get (test-url "/account")
+                    #:timeouts (make-timeout-config #:request 10)
+                    #:max-redirects 0))
+  ;; Should redirect to login or show login form
+  (define status (response-status-code resp))
+  (define body (bytes->string/utf-8 (response-body resp)))
+  (check-not-false (or (and (>= status 300) (< status 400))
+                       (string-contains? body "Log in")))
+  (response-close! resp))
