@@ -5,7 +5,7 @@
          infrastructure-userdb
          "../pkg-index/common.rkt"
          (submod "../pkg-index/common.rkt" for-testing)
-         "../pkg-index/dynamic.rkt"
+         "../pkg-index/api.rkt"
          "../users.rkt"
          (submod "../users.rkt" for-testing)
          "test-helpers.rkt")
