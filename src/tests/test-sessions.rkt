@@ -2,6 +2,9 @@
 
 (require rackunit
          web-server/http/cookie-parse
+         (only-in web-server/http/id-cookie
+                  make-id-cookie request-id-cookie)
+         (only-in net/cookies/server cookie-value)
          "../sessions.rkt"
          (submod "../sessions.rkt" for-testing)
          "test-helpers.rkt")
@@ -61,16 +64,27 @@
   (check-false (session-curator? s2))
   (check-false (session-superuser? s2)))
 
-(test-case "cookie round-trip: extract session key from request cookies"
+(test-case "signed cookie round-trip"
   (define key (create-session! "cookie@example.com"))
-  (define req (make-test-request #:cookies (list (cons "pltsession" key))))
-  ;; Extract the session key from the request the same way site.rkt does
-  (define session-cookies
-    (filter (lambda (c) (equal? (client-cookie-name c) "pltsession")) (request-cookies req)))
-  (check-equal? (length session-cookies) 1)
-  (define extracted-key (client-cookie-value (car session-cookies)))
+  ;; Create a signed cookie the way site.rkt does
+  (define signed-cookie
+    (make-id-cookie "pltsession" #:key (session-signing-key) key))
+  ;; Build a request with the signed cookie value
+  (define req (make-test-request
+               #:cookies (list (cons "pltsession" (cookie-value signed-cookie)))))
+  ;; Extract using request-id-cookie (validates HMAC signature)
+  (define extracted-key
+    (request-id-cookie req #:name "pltsession" #:key (session-signing-key)))
   (check-equal? extracted-key key)
   (check-pred session? (lookup-session/touch! extracted-key)))
+
+(test-case "forged cookie is rejected"
+  (define key (create-session! "cookie@example.com"))
+  ;; Put a raw (unsigned) session key as the cookie value
+  (define req (make-test-request #:cookies (list (cons "pltsession" key))))
+  ;; request-id-cookie should reject it (invalid HMAC)
+  (define extracted (request-id-cookie req #:name "pltsession" #:key (session-signing-key)))
+  (check-false extracted))
 
 (test-case "with-test-session helper works"
   (with-test-session "helper@example.com"
