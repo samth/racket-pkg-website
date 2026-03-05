@@ -18,7 +18,10 @@ compile:
 clean:
 	find . -depth -type d -iname compiled -exec rm -rf {} \;
 
-.PHONY: run bounce
+test:
+	raco test -y src/tests/
+
+.PHONY: run bounce test
 
 ###########################################################################
 

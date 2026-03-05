@@ -24,7 +24,8 @@ jobs:
             reloadable \
             aws \
             s3-sync \
-            plt-service-monitor
+            plt-service-monitor \
+            http-easy
 
       - name: Generate SSL keys
         run: make keys
