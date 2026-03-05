@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+    branches: [ "auth/*" ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1.12
+        with:
+          version: '9.1'
+
+      - name: Install dependencies
+        run: |
+          raco pkg install -i --skip-installed --auto \
+            'https://github.com/racket/infrastructure-userdb.git#main' \
+            reloadable \
+            aws \
+            s3-sync \
+            plt-service-monitor
+
+      - name: Generate SSL keys
+        run: make keys
+
+      - name: Run tests
+        run: raco test -y src/tests/

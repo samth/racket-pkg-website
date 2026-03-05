@@ -10,3 +10,5 @@ server-cert.pem
 private-key.pem
 pkgs-all.json.gz
 var/
+.racket
+.raco
