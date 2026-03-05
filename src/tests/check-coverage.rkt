@@ -12,21 +12,75 @@
 
 (define-runtime-path project-root "../..")
 
-;; Files to track with minimum coverage thresholds (percentage)
+;; Files to track with minimum coverage thresholds (percentage).
+;; Thresholds are set just below current measured coverage so that
+;; regressions are caught but normal fluctuations don't cause failures.
 (define thresholds
-  '(("sessions.rkt" . 95) ("users.rkt" . 80)
-                          ("pkg-index/common.rkt" . 60)
-                          ("pkg-index/api.rkt" . 90)))
+  '(;; Core auth modules (high coverage)
+    ("sessions.rkt"        . 95)
+    ("users.rkt"           . 80)
+    ("pkg-index/api.rkt"   . 90)
+    ("pkg-index/common.rkt" . 60)
+    ;; Utility modules
+    ("hash-utils.rkt"      . 95)
+    ("randomness.rkt"      . 95)
+    ("xexpr-utils.rkt"     . 90)
+    ("spdx.rkt"            . 85)
+    ("http-utils.rkt"      . 80)
+    ("bootstrap.rkt"       . 80)
+    ("html-utils.rkt"      . 75)
+    ("config.rkt"          . 75)
+    ;; Feature modules
+    ("package-source.rkt"  . 55)
+    ("rpc.rkt"             . 55)
+    ("challenge.rkt"       . 45)
+    ("packages.rkt"        . 40)
+    ("display-name.rkt"    . 35)
+    ("default.rkt"         . 35)
+    ("github-oauth.rkt"    . 25)
+    ("site.rkt"            . 25)
+    ;; Backend modules
+    ("pkg-index/dynamic.rkt" . 10)
+    ;; Low coverage — mostly side-effectful or hard to test in-process
+    ("gravatar.rkt"        . 15)
+    ("version.rkt"         . 5)
+    ("send-email.rkt"      . 0)))
 
 ;; Test files to run
 (define test-files
-  '("src/tests/test-sessions.rkt" "src/tests/test-users.rkt"
-                                  "src/tests/test-auth-api.rkt"
-                                  "src/tests/test-web-handlers.rkt"))
+  '("src/tests/test-sessions.rkt"
+    "src/tests/test-users.rkt"
+    "src/tests/test-auth-api.rkt"
+    "src/tests/test-web-handlers.rkt"
+    "src/tests/test-github-oauth.rkt"
+    "src/tests/test-smoke.rkt"))
 
 ;; Source files to instrument
 (define source-files
-  '("src/sessions.rkt" "src/users.rkt" "src/pkg-index/common.rkt" "src/pkg-index/api.rkt"))
+  '("src/sessions.rkt"
+    "src/users.rkt"
+    "src/github-oauth.rkt"
+    "src/site.rkt"
+    "src/pkg-index/api.rkt"
+    "src/pkg-index/common.rkt"
+    "src/pkg-index/dynamic.rkt"
+    "src/config.rkt"
+    "src/default.rkt"
+    "src/bootstrap.rkt"
+    "src/hash-utils.rkt"
+    "src/html-utils.rkt"
+    "src/http-utils.rkt"
+    "src/packages.rkt"
+    "src/randomness.rkt"
+    "src/send-email.rkt"
+    "src/xexpr-utils.rkt"
+    "src/display-name.rkt"
+    "src/gravatar.rkt"
+    "src/challenge.rkt"
+    "src/package-source.rkt"
+    "src/spdx.rkt"
+    "src/version.rkt"
+    "src/rpc.rkt"))
 
 (define cover-dir (build-path (find-system-path 'temp-dir) "cover-ci"))
 
