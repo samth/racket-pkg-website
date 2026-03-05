@@ -75,6 +75,49 @@
      (check-equal? (length sent-subjects) 1)
      (check-not-false (regexp-match #rx"reset" (car sent-subjects))))))
 
+(test-case "ensure-user-id! generates UUID for user without one"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id (ensure-user-id! "user@example.com"))
+                           (check-pred string? id)
+                           ;; UUID v4 format: 8-4-4-4-12 hex chars
+                           (check-regexp-match
+                            #px"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                            id))))
+
+(test-case "ensure-user-id! is idempotent"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id1 (ensure-user-id! "user@example.com"))
+                           (define id2 (ensure-user-id! "user@example.com"))
+                           (check-equal? id1 id2))))
+
+(test-case "ensure-user-id! errors for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-exn exn:fail?
+                                      (lambda () (ensure-user-id! "nobody@example.com"))))))
+
+(test-case "user-id-for-email returns #f for user without ID"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-false (user-id-for-email "user@example.com")))))
+
+(test-case "user-id-for-email returns #f for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-false (user-id-for-email "nobody@example.com")))))
+
+(test-case "user-id-for-email returns ID after ensure-user-id!"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id (ensure-user-id! "user@example.com"))
+                           (check-equal? (user-id-for-email "user@example.com") id))))
+
 (test-case "send-registration-or-reset-email! sends registration for new user"
   (call-with-test-userdb
    (lambda (db)
