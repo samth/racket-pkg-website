@@ -505,9 +505,15 @@
 
 (define (github-login-callback request)
   (define bindings (request-bindings request))
-  (define code (extract-binding/single 'code bindings))
-  (define state (extract-binding/single 'state bindings))
+  (define code
+    (with-handlers ([exn:fail? (lambda (_) #f)])
+      (extract-binding/single 'code bindings)))
+  (define state
+    (with-handlers ([exn:fail? (lambda (_) #f)])
+      (extract-binding/single 'state bindings)))
   (cond
+    [(not code)
+     (login-form "GitHub login was cancelled or failed.")]
     [(not (validate-csrf-state! state))
      (login-form "Invalid or expired GitHub login request. Please try again.")]
     [else
