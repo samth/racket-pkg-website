@@ -403,6 +403,14 @@
                       #:tags #f #:authors '("author@example.com") #:versions #f))
      (check-true (update-user-packages! "author@example.com")))))
 
+(test-case "validate-api-token works for backend auth"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "api-user@example.com" "pass")
+     (define token (generate-api-token! "api-user@example.com" "ci-token"))
+     (check-equal? (validate-api-token token) "api-user@example.com")
+     (check-false (validate-api-token "rpkg_invalid_token")))))
+
 (test-case "notice file is written after package operations"
   (call-with-test-env (lambda (db pkgs-dir)
                         (register-or-update-user! "author@example.com" "pass")
