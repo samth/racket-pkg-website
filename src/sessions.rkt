@@ -24,7 +24,7 @@
          (* 7 24 60 60)) ;; one week in seconds
      1000)) ;; convert to milliseconds
 
-(struct session (key expiry email password curator? superuser?) #:prefab)
+(struct session (key expiry email curator? superuser?) #:prefab)
 
 (define sessions (make-persistent-state 'session-store (lambda () (make-hash))))
 
@@ -40,7 +40,7 @@
     (when (and s (<= (session-expiry s) now))
       (hash-remove! ss session-key))))
 
-(define (create-session! email password #:curator? [curator? #f] #:superuser? [superuser? #f])
+(define (create-session! email #:curator? [curator? #f] #:superuser? [superuser? #f])
   (expire-sessions!)
   (define session-key (bytes->string/utf-8 (random-bytes/base64 32)))
   (hash-set! (sessions)
@@ -48,7 +48,6 @@
              (session session-key
                       (+ (current-inexact-milliseconds) session-lifetime)
                       email
-                      password
                       curator?
                       superuser?))
   session-key)
