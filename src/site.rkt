@@ -28,7 +28,7 @@
 (require "html-utils.rkt")
 (require "packages.rkt")
 (require "sessions.rkt")
-(require "json-rpc.rkt")
+(require "pkg-index/api.rkt")
 (require reloadable)
 (require "daemon.rkt")
 (require "config.rkt")
@@ -69,10 +69,6 @@
           (height "60")
           (alt "Racket Package Index")))))
 
-(define backend-baseurl
-  (or (@ (config) backend-baseurl)
-      (format "https://localhost:~a" (or (@ (config) pkg-index-port)
-                                         default-pkg-index-port))))
 
 (define default-empty-parsed-package-source
   (git-source "https://github.com/" #f 'git 'git "github.com" #f "" "" ""))
@@ -387,14 +383,8 @@
                             ,(form-group 4 5 (primary-button "Log in"))))))))
 
 (define (create-session-after-authentication-success! email password)
-  (define user-facts
-    (simple-json-rpc! #:sensitive? #t
-                      #:include-credentials? #f
-                      backend-baseurl
-                      "/api/authenticate"
-                      (hash 'email email
-                            'passwd password)))
-  (when (not (hash? user-facts)) ;; Uh-oh. Something went wrong
+  (define user-facts (authenticate-user email password))
+  (when (not (hash? user-facts))
     (error 'create-session-after-authentication-success! "Cannot retrieve user-facts for ~v" email))
   (create-session! email password
                    #:curator? (if (hash-ref user-facts 'curation #f) #t #f)
@@ -1414,7 +1404,7 @@
                             (a ((class "btn btn-default")
                                 (href ,k-url))
                                "Confirm deletion")))))
-   (simple-json-rpc! backend-baseurl "/api/package/del" (hash 'pkg package-name-str))
+   (delete-package!/authorized (current-email) package-name-str)
    (define completion-ch (make-channel))
    (delete-package! completion-ch (string->symbol package-name-str))
    (channel-get completion-ch)
@@ -1509,15 +1499,14 @@
   (and (or (equal? old-name name)
            ;; Don't let renames stomp on existing packages
            (not (package-detail (string->symbol name))))
-       (eq? #t (simple-json-rpc! backend-baseurl
-                                 "/api/package/modify-all"
-                                 (hash 'pkg old-name
-                                       'name name
-                                       'description description
-                                       'source source
-                                       'tags tags
-                                       'authors authors
-                                       'versions (unparse-versions versions))))
+       (eq? #t (parameterize ([current-user (current-email)])
+                 (save-package! #:old-name old-name
+                                #:new-name name
+                                #:description description
+                                #:source source
+                                #:tags tags
+                                #:authors authors
+                                #:versions (unparse-versions versions))))
        (let* ((new-pkg (or old-pkg (hash)))
               (new-pkg (hash-set new-pkg 'name name))
               (new-pkg (hash-set new-pkg 'description description))
@@ -1584,7 +1573,7 @@
 (define (update-my-packages-page request)
   (authentication-wrap/require-login
    #:request request
-   (simple-json-rpc! backend-baseurl "/api/update" (hash))
+   (update-user-packages! (current-email))
    (bootstrap-response "Refresh All My Packages"
                        `(div
                          (p "All packages where you are listed as an author are now being rescanned.")
@@ -1605,10 +1594,8 @@
   (if (not (current-user-curator?))
       #f
       (let ((new-ring (clamp-ring proposed-new-ring)))
-        (if (not (simple-json-rpc! backend-baseurl
-                                   "/api/package/curate"
-                                   (hash 'package-names package-name-strings
-                                         'ring new-ring)))
+        (if (not (parameterize ([current-user (current-email)])
+                   (curate-packages! package-name-strings new-ring)))
             #f
             (begin
               (for [(package-name-str (in-list package-name-strings))]
