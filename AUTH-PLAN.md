@@ -232,9 +232,12 @@ Or run individual test files: `raco test -y src/tests/test-sessions.rkt`
 Verify all tests pass against the *current* codebase before any Phase 1 changes. This is the baseline.
 
 > **Implementation notes (Phase 0 overall):**
-> - **40 tests total**: 10 session + 8 users + 10 auth-api + 7 web-handler + 5 smoke. All passing.
+> - **48 tests total**: 10 session + 8 users + 18 auth-api + 7 web-handler + 5 smoke. All passing.
 > - **Test count vs plan**: Plan mentioned more tests (particularly login flow, authenticated edit page, riposte HTTP API tests). These were deferred because the continuation-based web architecture makes them complex to test directly. The smoke tests provide basic HTTP coverage; more comprehensive tests will be added as the architecture is simplified in Phase 1.
-> - **Commits**: 10 commits on `auth/phase-0-testing` (plan + restructuring + CI + test helpers + session tests + user tests + auth-api tests + session test improvements + web handler/smoke tests + Makefile/CI update).
+> - **Coverage thresholds enforced in CI**: sessions.rkt 90%, users.rkt 40%, common.rkt 50%, dynamic.rkt 35%. Actual coverage: sessions 99.3%, users 48.2%, common 63.2%, dynamic 41.6%. Coverage runs as a separate CI job so it can fail independently of tests.
+> - **`for-testing` submodules**: Test-only exports (e.g. `initialize-for-testing!`, `expire-sessions!`, `sessions`) moved into `(module+ for-testing ...)` submodules in sessions.rkt, common.rkt, and users.rkt. Test files require these via `(submod ... for-testing)`.
+> - **Background thread fixes**: `initialize-for-testing!` added to common.rkt to set up `notice-path`, `static-path`, `cache-path`, `SUMMARY-PATH`, `static.src-path` so background threads from `signal-update!` don't error.
+> - **Commits**: 12 commits on `auth/phase-0-testing`.
 
 ### What could go wrong
 
@@ -246,9 +249,11 @@ Verify all tests pass against the *current* codebase before any Phase 1 changes.
 > - `build-update.rkt` had a top-level reference to `cache-path` that broke when `common.rkt` was restructured. Fixed by converting it to a function.
 > - `set!` cannot mutate module-imported identifiers in Racket, so `set-pkgs-path-for-testing!` and `set-userdb-for-testing!` setter functions were added to `common.rkt`.
 > - `racket/base` does not include `delay` (needed for `request` struct's `bindings/raw-promise` field). Required `racket/promise`.
-> - Background threads from `signal-update!` produce non-fatal `display-to-file: contract violation` errors in test mode because `notice-path` is `#f`.
+> - Background threads from `signal-update!` produce errors when `notice-path`, `static-path`, `cache-path`, `static.src-path` are `#f`. Fixed by adding `initialize-for-testing!` that sets up all state.
 > - `make-servlet-tester` parses responses as XML by default, requiring `#:raw? #t` workaround.
 > - `subprocess` returns 4 values, not 1. `current-directory` resolves differently under `raco test`.
+> - `raco cover` raw format only instruments files passed as arguments, not their dependencies. Must pass both test AND source files to get dependency coverage.
+> - `member` returns a list (truthy but not `#t`), requiring `check-not-false` instead of `check-true`.
 
 ---
 
