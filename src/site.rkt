@@ -18,6 +18,8 @@
 (require net/url)
 (require net/uri-codec)
 (require web-server/servlet)
+(require (only-in web-server/http/id-cookie
+                  make-id-cookie request-id-cookie logout-id-cookie))
 (require (only-in web-server/dispatchers/dispatch
                   next-dispatcher))
 (require (only-in web-server/private/util
@@ -181,26 +183,21 @@
                                                                   "false")))))
     body ...))
 
-(define clear-session-cookie (make-cookie COOKIE
-                                          ""
-                                          #:path "/"
-                                          #:expires "Thu, 01 Jan 1970 00:00:00 GMT"))
+(define clear-session-cookie (logout-id-cookie COOKIE #:path "/"))
 
 (define-syntax-rule (with-session-cookie cookie-value body ...)
   (let ((v cookie-value))
     (parameterize ((bootstrap-cookies
                     (if v
-                        (list (make-cookie COOKIE v #:path "/" #:secure? #t))
+                        (list (make-id-cookie COOKIE #:key (session-signing-key)
+                                              v #:path "/" #:secure? #t))
                         (list clear-session-cookie))))
       body ...)))
 
 (define (request->session request)
-  (define session-cookies
-    (filter (lambda (c) (equal? (client-cookie-name c) COOKIE))
-            (request-cookies request)))
-  (define session-keys (map client-cookie-value session-cookies))
-  ;; (log-info "Session keys from cookie: ~a" session-keys)
-  (for/or ((k session-keys)) (lookup-session/touch! k)))
+  (define session-key
+    (request-id-cookie request #:name COOKIE #:key (session-signing-key)))
+  (and session-key (lookup-session/touch! session-key)))
 
 (define (authentication-wrap* require-login? request body)
   (define session (request->session request))
@@ -254,10 +251,10 @@
                      (current-session session)
                      (bootstrap-cookies
                       (if session
-                          (list (make-cookie COOKIE
-                                             (session-key session)
-                                             #:path "/"
-                                             #:secure? #t))
+                          (list (make-id-cookie COOKIE #:key (session-signing-key)
+                                                (session-key session)
+                                                #:path "/"
+                                                #:secure? #t))
                           (list))))
         (with-site-config (body)))))
 

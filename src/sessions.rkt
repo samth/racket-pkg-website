@@ -3,6 +3,7 @@
 (provide current-session
          current-email
          session-lifetime
+         session-signing-key
          (struct-out session)
          create-session!
          destroy-session!
@@ -13,10 +14,11 @@
   (provide expire-sessions!
            sessions))
 
-(require "randomness.rkt")
-(require "config.rkt")
-(require "hash-utils.rkt")
-(require reloadable)
+(require racket/random
+         "randomness.rkt"
+         "config.rkt"
+         "hash-utils.rkt"
+         reloadable)
 
 (define current-session (make-parameter #f))
 (define session-lifetime
@@ -27,6 +29,11 @@
 (struct session (key expiry email curator? superuser?) #:prefab)
 
 (define sessions (make-persistent-state 'session-store (lambda () (make-hash))))
+
+;; HMAC signing key for session cookies. Persists across module reloads
+;; but regenerated on server restart (which clears in-memory sessions anyway).
+(define session-signing-key
+  (make-persistent-state 'session-signing-key (lambda () (crypto-random-bytes 128))))
 
 (define (current-email)
   (define s (current-session))
