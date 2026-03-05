@@ -379,13 +379,10 @@
                                              (p ,error-message))))
                             ,(form-group 4 5 (primary-button "Log in"))))))))
 
-(define (create-session-after-authentication-success! email password)
-  (define user-facts (authenticate-user email password))
-  (when (not (hash? user-facts))
-    (error 'create-session-after-authentication-success! "Cannot retrieve user-facts for ~v" email))
+(define (create-session-after-authentication-success! email)
   (create-session! email
-                   #:curator? (if (hash-ref user-facts 'curation #f) #t #f)
-                   #:superuser? (if (hash-ref user-facts 'superuser #f) #t #f)))
+                   #:curator? (and (curation-administrator? email) #t)
+                   #:superuser? (and (superuser? email) #t)))
 
 (define (process-login-credentials request)
   (define-form-bindings/trim request (email password))
@@ -394,7 +391,7 @@
         [(not (login-password-correct? email password))
          (login-form "Incorrect password, or nonexistent user.")]
         [else
-         (create-session-after-authentication-success! email password)]))
+         (create-session-after-authentication-success! email)]))
 
 (define (register-form #:email [email ""]
                        #:email_for_code [email_for_code ""]
@@ -491,7 +488,7 @@
      (retry "The code you entered was incorrect. Please try again.")]
     [else
      (register-or-update-user! email password)
-     (create-session-after-authentication-success! email password)]))
+     (create-session-after-authentication-success! email)]))
 
 (define ((check-challenge challenge) request)
   (define-form-bindings/trim request (email_for_code question_answer))
@@ -1401,10 +1398,10 @@
                             (a ((class "btn btn-default")
                                 (href ,k-url))
                                "Confirm deletion")))))
-   (delete-package!/authorized (current-email) package-name-str)
-   (define completion-ch (make-channel))
-   (delete-package! completion-ch (string->symbol package-name-str))
-   (channel-get completion-ch)
+   (when (delete-package!/authorized (current-email) package-name-str)
+     (define completion-ch (make-channel))
+     (delete-package! completion-ch (string->symbol package-name-str))
+     (channel-get completion-ch))
    (bootstrap-redirect (main-page-url))))
 
 (define ((update-draft draft0) request)
