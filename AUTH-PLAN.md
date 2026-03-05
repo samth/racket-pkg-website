@@ -69,6 +69,14 @@ Key modules to restructure:
 
 The restructuring should not change any runtime behavior - the same code runs in the same order when the server starts normally. It only changes *when* the code runs (at explicit initialization rather than at module load time).
 
+> **Implementation notes (0.1):**
+> - `common.rkt`: All state variables changed to `#f` initial values. All side effects moved into an `(initialize!)` function. Added `set-pkgs-path-for-testing!` and `set-userdb-for-testing!` setter functions for test isolation. `dynamic.rkt` calls `(initialize!)` at the start of `go`.
+> - `users.rkt`: Changed to lazy initialization via `ensure-initialized!` called from each public function. Added `initialize-users-for-testing!` that accepts a test userdb and registration state.
+> - `build-update.rkt`: `SUMMARY-ETAG-PATH` had to be changed from a top-level `define` to a function `(define (SUMMARY-ETAG-PATH) ...)` because it referenced `cache-path` (now `#f` until initialized). Two call sites updated.
+> - `dynamic.rkt`: Expanded `provide` to export `curation-administrator?`, `superuser?`, `current-user`, `save-package!`, `curate-packages!`, `package-author?`, `ensure-authenticate/email+passwd` for test access.
+> - Verified all 6 consumer modules of `common.rkt` (`dynamic.rkt`, `build-update.rkt`, `update.rkt`, `static.rkt`, `notify.rkt`, `basic.rkt`) only use common.rkt values inside functions, not at top level (except `build-update.rkt` which was fixed).
+> - Verified server still starts correctly with `PKG_SERVER_HTTP=1 timeout 15 racket -y src/main.rkt`.
+
 ### 0.2 Test directory and structure
 
 Create `src/tests/` directory with:
@@ -79,6 +87,8 @@ Create `src/tests/` directory with:
 - `src/tests/test-web-handlers.rkt` - Direct handler tests using `web-server/test`
 - `src/tests/test-smoke.rkt` - HTTP smoke tests against a running server
 - `src/tests/test-helpers.rkt` - Shared test utilities (temp userdb setup, test user creation, etc.)
+
+> **Implementation notes (0.2):** All files created as planned.
 
 ### 0.3 Test helpers (`test-helpers.rkt`)
 
@@ -91,6 +101,8 @@ Provides utilities used by all test files:
 
 Uses `rackunit` and constructs `request` structs from `web-server/http/request-structs`.
 
+> **Implementation notes (0.3):** Implemented as planned. Key finding: `request` struct has 8 fields (method, uri, headers/raw, bindings/raw-promise, post-data/raw, host-ip, host-port, client-ip). Cookies are passed as `Cookie` headers, extracted via `request-cookies` from `web-server/http/cookie-parse`. The `bindings/raw-promise` field requires a `delay` (from `racket/promise`, not available in `racket/base`). No stdlib duplication found.
+
 ### 0.4 Session tests (`test-sessions.rkt`)
 
 Test the current behavior (then verify it still passes after Phase 1 changes):
@@ -102,6 +114,10 @@ Test the current behavior (then verify it still passes after Phase 1 changes):
 - `current-email` returns the session's email when `current-session` is parameterized
 - Session cookie round-trip: verify `request->session` (from site.rkt) extracts session from cookie
 
+> **Implementation notes (0.4):** 10 tests implemented. Divergences from plan:
+> - Session expiry test: Initial implementation was flawed (destroyed and recreated sessions instead of testing `expire-sessions!`). Fixed by exporting `sessions` (the persistent state thunk) and `expire-sessions!` from `sessions.rkt`, then using `hash-set!` to overwrite a session with an expired copy and calling `expire-sessions!` to verify removal.
+> - Cookie round-trip test: `request->session` is defined in `site.rkt` which has too many dependencies to `require` from unit tests. Instead, the test constructs a request with cookies and extracts them using `request-cookies` + `client-cookie-name`/`client-cookie-value` from `web-server/http/cookie-parse`, replicating the same extraction logic.
+
 ### 0.5 User management tests (`test-users.rkt`)
 
 Against a temporary test userdb:
@@ -110,6 +126,8 @@ Against a temporary test userdb:
 - `login-password-correct?` returns `#f` for non-existent user
 - Password change: `register-or-update-user!` with new password, old password fails, new password works
 - Registration codes: generate a code directly via `generate-registration-code!` on a test `registration-state`, validate with `registration-code-correct?` (skip email sending entirely)
+
+> **Implementation notes (0.5):** 8 tests implemented as planned. The `infrastructure-userdb` API uses `check-registration-code` (not `registration-code-correct?` — that's the wrapper in `users.rkt` that calls `check-registration-code`). Tests call `generate-registration-code!` directly on a `make-registration-state` value, bypassing email entirely as planned.
 
 ### 0.6 Backend API integration tests (`test-auth-api.rkt`)
 
@@ -131,6 +149,11 @@ Against a temporary test userdb:
 
 Riposte is well-suited for these structured JSON API tests with its built-in assertion DSL.
 
+> **Implementation notes (0.6):** Direct function tests: 10 tests implemented. Divergences:
+> - `test-auth-api-http.rkt` (riposte HTTP tests) deferred — the backend is not designed to start independently in test mode, and the direct function tests already provide good coverage of the same logic. The smoke tests (0.8) cover the HTTP layer.
+> - Package delete test not implemented — `api/package/del` calls `package-remove!` which also triggers `signal-static!` that expects initialized state. Added tests for non-author-cannot-modify and superuser-can-modify instead.
+> - Background thread errors: `signal-update!` triggers `do-update!` and `do-notify!` which try to write to `notice-path` (still `#f` in test mode). These are non-fatal, caught by `safe-run!` and logged to stderr. Tests still pass. Future improvement: add `set-notice-path-for-testing!` or make `signal-update!` skip when paths are uninitialized.
+
 ### 0.7 Web handler tests (`test-web-handlers.rkt`)
 
 Use `web-server/test` `make-servlet-tester` for direct handler testing:
@@ -143,6 +166,12 @@ Use `web-server/test` `make-servlet-tester` for direct handler testing:
 - Search page works
 
 These test the request→response pipeline without starting a real server.
+
+> **Implementation notes (0.7):** 7 tests implemented. Divergences:
+> - `make-servlet-tester` tries to parse all responses as XML by default, which fails for `response/output` (used by the site). Fixed by using `#:raw? #t #:headers? #t` to get raw bytes, then parsing status codes from HTTP headers manually.
+> - Main page returns 302 redirect to `/index.html` (static content), not 200. Test adjusted to verify the redirect.
+> - "Edit page renders when authenticated" test not implemented — would require creating a session and passing it via cookies through the tester, which is complex with `send/suspend/dispatch` continuations. The smoke tests cover this case more reliably.
+> - `site.rkt` loads successfully as a module despite top-level side effects (config reading), because the `reloadable` config system returns defaults when no config is set. A `package-change-handler` thread starts on module load.
 
 ### 0.8 HTTP smoke tests (`test-smoke.rkt`)
 
@@ -179,6 +208,13 @@ Example pattern:
 
 Server started with test config (temp userdb, temp packages dir, no SSL, random port).
 
+> **Implementation notes (0.8):** 5 tests implemented. Divergences:
+> - Cookie jar / login flow tests (POST `/login`, authenticated edit page, logout) not implemented — the login flow uses `send/suspend/dispatch` continuations which generate unique URLs, making it complex to follow via simple HTTP requests. These will be better tested after Phase 1 when the direct function call architecture makes it easier to set up authenticated sessions programmatically.
+> - Server starts as a subprocess (not a thread) since it blocks. Uses `find-free-port` (bind to port 0, get assigned port, close listener) to avoid port conflicts. Uses `plumber-add-flush!` for cleanup.
+> - `subprocess` returns 4 values (proc, stdout, stdin, stderr) — initially wrote code that expected 1 value.
+> - File paths required `define-runtime-path` to resolve correctly since `raco test` sets `current-directory` to the test file's directory, not the project root.
+> - Needed to install `http-easy` package (not included in base Racket 9.1).
+
 ### 0.9 Test runner
 
 Add a `Makefile` target:
@@ -189,15 +225,30 @@ test:
 
 Or run individual test files: `raco test -y src/tests/test-sessions.rkt`
 
+> **Implementation notes (0.9):** Makefile `test` target added as planned. CI workflow updated to include `http-easy` in dependencies.
+
 ### Testing Phase 0
 
 Verify all tests pass against the *current* codebase before any Phase 1 changes. This is the baseline.
+
+> **Implementation notes (Phase 0 overall):**
+> - **40 tests total**: 10 session + 8 users + 10 auth-api + 7 web-handler + 5 smoke. All passing.
+> - **Test count vs plan**: Plan mentioned more tests (particularly login flow, authenticated edit page, riposte HTTP API tests). These were deferred because the continuation-based web architecture makes them complex to test directly. The smoke tests provide basic HTTP coverage; more comprehensive tests will be added as the architecture is simplified in Phase 1.
+> - **Commits**: 10 commits on `auth/phase-0-testing` (plan + restructuring + CI + test helpers + session tests + user tests + auth-api tests + session test improvements + web handler/smoke tests + Makefile/CI update).
 
 ### What could go wrong
 
 - **Module restructuring breaks runtime behavior**: Moving side effects into initialization functions could change execution order or introduce bugs. Mitigation: restructure carefully, verify the server starts and works normally before writing any tests.
 - **Email sending**: Registration code tests skip email sending entirely by calling `generate-registration-code!` directly on a test `registration-state`. No need to mock email.
 - **Static file generation**: Some backend operations trigger static file regeneration. Tests should provide a temp static directory via config, or the restructured modules should allow suppressing this.
+
+> **What actually went wrong:**
+> - `build-update.rkt` had a top-level reference to `cache-path` that broke when `common.rkt` was restructured. Fixed by converting it to a function.
+> - `set!` cannot mutate module-imported identifiers in Racket, so `set-pkgs-path-for-testing!` and `set-userdb-for-testing!` setter functions were added to `common.rkt`.
+> - `racket/base` does not include `delay` (needed for `request` struct's `bindings/raw-promise` field). Required `racket/promise`.
+> - Background threads from `signal-update!` produce non-fatal `display-to-file: contract violation` errors in test mode because `notice-path` is `#f`.
+> - `make-servlet-tester` parses responses as XML by default, requiring `#:raw? #t` workaround.
+> - `subprocess` returns 4 values, not 1. `current-directory` resolves differently under `raco test`.
 
 ---
 
