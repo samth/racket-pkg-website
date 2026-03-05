@@ -339,6 +339,70 @@
                           (define info (package-info "tag-pkg"))
                           (check-equal? (hash-ref info 'tags) '("apple" "Zebra"))))))
 
+(test-case "authenticate-user returns facts for valid credentials"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "auth@example.com" "goodpass")
+     (define result (authenticate-user "auth@example.com" "goodpass"))
+     (check-pred hash? result)
+     (check-equal? (hash-ref result 'curation) #f)
+     (check-equal? (hash-ref result 'superuser) #f))))
+
+(test-case "authenticate-user returns #f for wrong password"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "auth@example.com" "goodpass")
+     (check-false (authenticate-user "auth@example.com" "badpass")))))
+
+(test-case "authenticate-user returns #f for non-string inputs"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (check-false (authenticate-user #f "pass"))
+     (check-false (authenticate-user "email" #f)))))
+
+(test-case "authenticate-user shows curator flag for curator"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "jay.mccarthy@gmail.com" "pass")
+     (define result (authenticate-user "jay.mccarthy@gmail.com" "pass"))
+     (check-pred hash? result)
+     (check-equal? (hash-ref result 'curation) #t)
+     (check-equal? (hash-ref result 'superuser) #t))))
+
+(test-case "delete-package!/authorized deletes for author"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "author@example.com" "pass")
+     (parameterize ([current-user "author@example.com"])
+       (save-package! #:old-name "" #:new-name "del-auth-pkg" #:description "To delete"
+                      #:source "https://github.com/test/del.git"
+                      #:tags #f #:authors '("author@example.com") #:versions #f))
+     (check-true (package-exists? "del-auth-pkg"))
+     (check-true (delete-package!/authorized "author@example.com" "del-auth-pkg"))
+     (check-false (package-exists? "del-auth-pkg")))))
+
+(test-case "delete-package!/authorized fails for non-author"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "author@example.com" "pass")
+     (register-or-update-user! "other@example.com" "pass")
+     (parameterize ([current-user "author@example.com"])
+       (save-package! #:old-name "" #:new-name "no-del-pkg" #:description "Protected"
+                      #:source "https://github.com/test/no-del.git"
+                      #:tags #f #:authors '("author@example.com") #:versions #f))
+     (check-false (delete-package!/authorized "other@example.com" "no-del-pkg"))
+     (check-true (package-exists? "no-del-pkg")))))
+
+(test-case "update-user-packages! signals update"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "author@example.com" "pass")
+     (parameterize ([current-user "author@example.com"])
+       (save-package! #:old-name "" #:new-name "upd-user-pkg" #:description "For update"
+                      #:source "https://github.com/test/upd-user.git"
+                      #:tags #f #:authors '("author@example.com") #:versions #f))
+     (check-true (update-user-packages! "author@example.com")))))
+
 (test-case "notice file is written after package operations"
   (call-with-test-env (lambda (db pkgs-dir)
                         (register-or-update-user! "author@example.com" "pass")
