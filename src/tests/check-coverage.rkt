@@ -14,9 +14,9 @@
 
 ;; Files to track with minimum coverage thresholds (percentage)
 (define thresholds
-  '(("sessions.rkt" . 90) ("users.rkt" . 40)
-                          ("pkg-index/common.rkt" . 50)
-                          ("pkg-index/dynamic.rkt" . 35)))
+  '(("sessions.rkt" . 95) ("users.rkt" . 80)
+                          ("pkg-index/common.rkt" . 60)
+                          ("pkg-index/dynamic.rkt" . 45)))
 
 ;; Test files to run
 (define test-files

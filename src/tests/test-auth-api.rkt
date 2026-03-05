@@ -280,6 +280,65 @@
                         (check-equal? (package-ref info 'tags) '())
                         (check-equal? (package-ref info 'checksum-error) #f))))
 
+(test-case "save-package! with versions creates version entries"
+  (call-with-test-env (lambda (db pkgs-dir)
+                        (register-or-update-user! "author@example.com" "pass")
+                        (parameterize ([current-user "author@example.com"])
+                          (define result
+                            (save-package! #:old-name ""
+                                           #:new-name "ver-pkg"
+                                           #:description "With versions"
+                                           #:source "https://github.com/test/ver.git"
+                                           #:tags #f
+                                           #:authors '("author@example.com")
+                                           #:versions '(("6.0" "https://github.com/test/ver6.git"))))
+                          (check-true result)
+                          (define info (package-info "ver-pkg"))
+                          (define versions (hash-ref info 'versions #f))
+                          (check-true (hash? versions))
+                          (check-true (hash-has-key? versions "6.0"))
+                          (check-equal? (hash-ref (hash-ref versions "6.0") 'source)
+                                        "https://github.com/test/ver6.git")))))
+
+(test-case "save-package! renames a package"
+  (call-with-test-env (lambda (db pkgs-dir)
+                        (register-or-update-user! "author@example.com" "pass")
+                        (parameterize ([current-user "author@example.com"])
+                          (save-package! #:old-name ""
+                                         #:new-name "old-name-pkg"
+                                         #:description "Before rename"
+                                         #:source "https://github.com/test/rename.git"
+                                         #:tags #f
+                                         #:authors '("author@example.com")
+                                         #:versions #f)
+                          (define result
+                            (save-package! #:old-name "old-name-pkg"
+                                           #:new-name "new-name-pkg"
+                                           #:description "After rename"
+                                           #:source "https://github.com/test/rename.git"
+                                           #:tags #f
+                                           #:authors #f
+                                           #:versions #f))
+                          (check-true result)
+                          (check-false (package-exists? "old-name-pkg"))
+                          (check-true (package-exists? "new-name-pkg"))
+                          (define info (package-info "new-name-pkg"))
+                          (check-equal? (hash-ref info 'description) "After rename")))))
+
+(test-case "save-package! with tags normalizes them"
+  (call-with-test-env (lambda (db pkgs-dir)
+                        (register-or-update-user! "author@example.com" "pass")
+                        (parameterize ([current-user "author@example.com"])
+                          (save-package! #:old-name ""
+                                         #:new-name "tag-pkg"
+                                         #:description "Tagged"
+                                         #:source "https://github.com/test/tag.git"
+                                         #:tags '("Zebra" "apple" "apple")
+                                         #:authors '("author@example.com")
+                                         #:versions #f)
+                          (define info (package-info "tag-pkg"))
+                          (check-equal? (hash-ref info 'tags) '("apple" "Zebra"))))))
+
 (test-case "notice file is written after package operations"
   (call-with-test-env (lambda (db pkgs-dir)
                         (register-or-update-user! "author@example.com" "pass")

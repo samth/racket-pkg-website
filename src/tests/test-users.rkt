@@ -60,3 +60,30 @@
                            (initialize-users-for-testing! db codes)
                            (define code (generate-registration-code! codes "reg@example.com"))
                            (check-false (registration-code-correct? "other@example.com" code)))))
+
+(test-case "send-registration-or-reset-email! sends reset for existing user"
+  (call-with-test-userdb
+   (lambda (db)
+     (define codes (make-registration-state))
+     (initialize-users-for-testing! db codes)
+     (register-or-update-user! "existing@example.com" "pass")
+     (define sent-subjects '())
+     (parameterize ([current-send-email
+                     (lambda (from subject to body)
+                       (set! sent-subjects (cons subject sent-subjects)))])
+       (send-registration-or-reset-email! "existing@example.com"))
+     (check-equal? (length sent-subjects) 1)
+     (check-not-false (regexp-match #rx"reset" (car sent-subjects))))))
+
+(test-case "send-registration-or-reset-email! sends registration for new user"
+  (call-with-test-userdb
+   (lambda (db)
+     (define codes (make-registration-state))
+     (initialize-users-for-testing! db codes)
+     (define sent-subjects '())
+     (parameterize ([current-send-email
+                     (lambda (from subject to body)
+                       (set! sent-subjects (cons subject sent-subjects)))])
+       (send-registration-or-reset-email! "newuser@example.com"))
+     (check-equal? (length sent-subjects) 1)
+     (check-not-false (regexp-match #rx"confirmation" (car sent-subjects))))))

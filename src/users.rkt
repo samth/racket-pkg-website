@@ -8,14 +8,18 @@
          initialize-users!)
 
 (module+ for-testing
-  (provide initialize-users-for-testing!))
+  (provide initialize-users-for-testing!
+           current-send-email))
 
 (require reloadable)
 (require infrastructure-userdb)
 (require "config.rkt")
 (require "hash-utils.rkt")
 (require "default.rkt")
-(require "send-email.rkt")
+(require (prefix-in real: "send-email.rkt"))
+
+;; Indirection for testing: allows tests to replace the email sender
+(define current-send-email (make-parameter real:send-email))
 
 (define-logger racket-pkg-website/users)
 
@@ -56,7 +60,7 @@
 
 (define (send-password-reset-email! email)
   (log-racket-pkg-website/users-info "Sending password reset email to ~v" email)
-  (send-email
+  ((current-send-email)
    (sender-address)
    "Account password reset for Racket Package Catalog"
    (list email)
@@ -70,7 +74,7 @@
 
 (define (send-account-registration-email! email)
   (log-racket-pkg-website/users-info "Sending account registration email to ~v" email)
-  (send-email
+  ((current-send-email)
    (sender-address)
    "Account confirmation for Racket Package Catalog"
    (list email)
