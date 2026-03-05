@@ -10,7 +10,7 @@
 
 (define SUMMARY-HOST "pkg-build.racket-lang.org")
 (define SUMMARY-URL (string-append "/" SUMMARY-NAME))
-(define SUMMARY-ETAG-PATH (build-path cache-path (format "~a.etag" SUMMARY-NAME)))
+(define (SUMMARY-ETAG-PATH) (build-path cache-path (format "~a.etag" SUMMARY-NAME)))
 
 (define (extract-tag hs)
   (or
@@ -31,7 +31,7 @@
 
 (define (build-update!)
   (define cur-version
-    (file->bytes* SUMMARY-ETAG-PATH #""))
+    (file->bytes* (SUMMARY-ETAG-PATH) #""))
   (log! "build-update: Current: ~v\n" cur-version)
 
   (define-values
@@ -62,7 +62,7 @@
       (λ (new-op)
         (copy-port get-ip new-op)))
 
-    (with-output-to-file SUMMARY-ETAG-PATH
+    (with-output-to-file (SUMMARY-ETAG-PATH)
       #:exists 'truncate/replace
       (λ ()
         (write-bytes get-version)))

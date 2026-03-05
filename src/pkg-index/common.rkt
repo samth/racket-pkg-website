@@ -19,59 +19,71 @@
 
 (define-runtime-path src* ".")
 
-(define src (get-config src src*))
-(define root (get-config root default-root))
-
-(make-directory* root)
-(define users.new-path (get-config users.new-path (default-users root)))
-(define userdb (userdb-config users.new-path
-                              #f ;; write not permitted. The racket-pkg-website does all writes.
-                              ))
-
-;; Since package downloads don't normally use the GitHub API anymore,
-;; allow the GitHub options to be #f and make the default load strings
-;; only if default files exist
-(let ((check+load-file (lambda (filename)
-                         (if (file-exists? filename)
-                             (file->string filename)
-                             (begin
-                               #;(raise-user-error 'pkg-index "Cannot find file ~a" filename)
-                               #f)))))
-  (github-client_id (get-config github-client_id
-                                (check+load-file (build-path root "client_id"))))
-  (github-client_secret (get-config github-client_secret
-                                    (check+load-file (build-path root "client_secret")))))
-
-(define cache-path (get-config cache-path (build-path root "cache")))
-(make-directory* cache-path)
-
+;; State variables, initialized by initialize!
+(define src #f)
+(define root #f)
+(define users.new-path #f)
+(define userdb #f)
+(define cache-path #f)
 (define SUMMARY-NAME "summary.rktd")
-(define SUMMARY-PATH (build-path cache-path SUMMARY-NAME))
+(define SUMMARY-PATH #f)
+(define pkgs-path #f)
+(define static.src-path #f)
+(define static-path #f)
+(define notice-path #f)
+(define s3-bucket #f)
+(define s3-bucket-region #f)
+(define beat-s3-bucket #f)
 
-(define pkgs-path (get-config pkgs-path (build-path root "pkgs")))
-(make-directory* pkgs-path)
+(define (initialize!)
+  (set! src (get-config src src*))
+  (set! root (get-config root default-root))
+  (make-directory* root)
+  (set! users.new-path (get-config users.new-path (default-users root)))
+  (set! userdb
+        (userdb-config users.new-path
+                       #f ;; write not permitted. The racket-pkg-website does all writes.
+                       ))
+  ;; Since package downloads don't normally use the GitHub API anymore,
+  ;; allow the GitHub options to be #f and make the default load strings
+  ;; only if default files exist
+  (let ([check+load-file (lambda (filename)
+                           (if (file-exists? filename)
+                               (file->string filename)
+                               (begin
+                                 #;(raise-user-error 'pkg-index "Cannot find file ~a" filename)
+                                 #f)))])
+    (github-client_id (get-config github-client_id (check+load-file (build-path root "client_id"))))
+    (github-client_secret (get-config github-client_secret
+                                      (check+load-file (build-path root "client_secret")))))
 
-(define static.src-path (get-config static.src-path (build-path src "static")))
-(define static-path (get-config static-path default-static-gen))
-(define notice-path (get-config notice-path (build-path static-path "notice.json")))
-(make-directory* static-path)
+  (set! cache-path (get-config cache-path (build-path root "cache")))
+  (make-directory* cache-path)
+  (set! SUMMARY-PATH (build-path cache-path SUMMARY-NAME))
+
+  (set! pkgs-path (get-config pkgs-path (build-path root "pkgs")))
+  (make-directory* pkgs-path)
+
+  (set! static.src-path (get-config static.src-path (build-path src "static")))
+  (set! static-path (get-config static-path default-static-gen))
+  (set! notice-path (get-config notice-path (build-path static-path "notice.json")))
+  (make-directory* static-path)
+
+  (set! s3-bucket (get-config s3-bucket #f))
+  (set! s3-bucket-region (get-config s3-bucket-region #f))
+  (set! beat-s3-bucket (get-config beat-s3-bucket #f)))
 
 (define (package-list)
-  (sort (map path->string (directory-list pkgs-path))
-        string-ci<=?))
+  (sort (map path->string (directory-list pkgs-path)) string-ci<=?))
 
 (define (package-exists? pkg-name)
   (file-exists? (build-path^ pkgs-path pkg-name)))
 
 (define (read-package-info pkg-name)
-  (with-handlers ([exn:fail?
-                   (λ (x)
-                     ((error-display-handler)
-                      (exn-message x)
-                      x)
-                     (hasheq))])
-    (define p
-      (build-path^ pkgs-path pkg-name))
+  (with-handlers ([exn:fail? (λ (x)
+                               ((error-display-handler) (exn-message x) x)
+                               (hasheq))])
+    (define p (build-path^ pkgs-path pkg-name))
     (define v
       (if (package-exists? pkg-name)
           (file->value p)
@@ -84,49 +96,37 @@
 
 (define (package-info pkg-name #:version [version #f])
   (define ht (read-package-info pkg-name))
-  (define no-version
-    (hash-set ht 'name pkg-name))
+  (define no-version (hash-set ht 'name pkg-name))
   (cond
-   [(and version
-         (hash-has-key? no-version 'versions)
-         (hash? (hash-ref no-version 'versions #f))
-         (hash-has-key? (hash-ref no-version 'versions) version)
-         (hash? (hash-ref (hash-ref no-version 'versions) version #f)))
-    =>
-    (λ (version-ht)
-      (hash-merge version-ht no-version))]
-   [else
-    no-version]))
+    [(and version
+          (hash-has-key? no-version 'versions)
+          (hash? (hash-ref no-version 'versions #f))
+          (hash-has-key? (hash-ref no-version 'versions) version)
+          (hash? (hash-ref (hash-ref no-version 'versions) version #f)))
+     =>
+     (λ (version-ht) (hash-merge version-ht no-version))]
+    [else no-version]))
 
 (define (package-ref pkg-info key)
-  (hash-ref pkg-info key
-            (λ ()
-              (match key
-                [(or 'author 'source)
-                 (error 'pkg "Package ~e is missing a required field: ~e"
-                        (hash-ref pkg-info 'name) key)]
-                ['checksum
-                 ""]
-                ['ring
-                 2]
-                ['checksum-error
-                 #f]
-                ['tags
-                 empty]
-                ['versions
-                 (hash)]
-                [(or 'last-checked 'last-edit 'last-updated)
-                 -inf.0]))))
+  (hash-ref
+   pkg-info
+   key
+   (λ ()
+     (match key
+       [(or 'author 'source)
+        (error 'pkg "Package ~e is missing a required field: ~e" (hash-ref pkg-info 'name) key)]
+       ['checksum ""]
+       ['ring 2]
+       ['checksum-error #f]
+       ['tags empty]
+       ['versions (hash)]
+       [(or 'last-checked 'last-edit 'last-updated) -inf.0]))))
 
 (define (package-info-set! pkg-name i)
-  (call-with-atomic-output-file
-   (build-path^ pkgs-path pkg-name)
-   (lambda (out path)
-     (write i out))))
+  (call-with-atomic-output-file (build-path^ pkgs-path pkg-name) (lambda (out path) (write i out))))
 
 (define (hash-merge from to)
-  (for/fold ([to to])
-            ([(k v) (in-hash from)])
+  (for/fold ([to to]) ([(k v) (in-hash from)])
     (hash-set to k v)))
 
 (define (author->list as)
@@ -138,14 +138,11 @@
 (define (valid-author? a)
   (not (regexp-match #rx"[ :]" a)))
 
-(define valid-tag?
-  valid-name?)
+(define valid-tag? valid-name?)
 
 (define (log!* args suffix)
   (parameterize ([date-display-format 'iso-8601])
-    (printf "~a: ~a~a" (date->string (current-date) #t)
-            (apply format args)
-            suffix)
+    (printf "~a: ~a~a" (date->string (current-date) #t) (apply format args) suffix)
     (flush-output)))
 
 (define (log! . args)
@@ -160,19 +157,13 @@
   (log! "END ~a ~v" f args))
 
 (define (safe-run! run-sema t)
-  (thread
-   (λ ()
-     (call-with-semaphore run-sema
-       (λ ()
-         (with-handlers ([exn:fail? (λ (x) ((error-display-handler)
-                                            (exn-message x)
-                                            x))])
-           (t)))))))
+  (thread (λ ()
+            (call-with-semaphore
+             run-sema
+             (λ ()
+               (with-handlers ([exn:fail? (λ (x) ((error-display-handler) (exn-message x) x))])
+                 (t)))))))
 
-(define s3-bucket (get-config s3-bucket #f))
-(define s3-bucket-region (get-config s3-bucket-region #f))
-
-(define beat-s3-bucket (get-config beat-s3-bucket #f))
 (define (heartbeat task)
   (when beat-s3-bucket
     (beat beat-s3-bucket task)))

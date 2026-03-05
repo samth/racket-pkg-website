@@ -4,7 +4,9 @@
 (provide login-password-correct?
          send-registration-or-reset-email!
          registration-code-correct?
-         register-or-update-user!)
+         register-or-update-user!
+         initialize-users!
+         initialize-users-for-testing!)
 
 (require reloadable)
 (require infrastructure-userdb)
@@ -15,30 +17,40 @@
 
 (define-logger racket-pkg-website/users)
 
-(define userdb (userdb-config (config-path
-                               (or (@ (config) user-directory)
-                                   (default-users (or (@ (config) root)
-                                                      default-root))))
-                              #t ;; writeable!
-                              ))
+;; State variables, initialized lazily or via initialize-users! / initialize-users-for-testing!
+(define userdb #f)
+(define *codes* #f)
 
-(define *codes*
-  (make-persistent-state '*codes* (lambda () (make-registration-state))))
+(define (ensure-initialized!)
+  (unless userdb
+    (initialize-users!)))
+
+(define (initialize-users!)
+  (set! userdb
+        (userdb-config (config-path (or (@ (config) user-directory)
+                                        (default-users (or (@ (config) root) default-root))))
+                       #t ;; writeable!
+                       ))
+  (set! *codes* (make-persistent-state '*codes* (lambda () (make-registration-state))))
+  (log-racket-pkg-website/users-info "Will use sender address ~v" (sender-address)))
+
+(define (initialize-users-for-testing! test-userdb test-codes-state)
+  (set! userdb test-userdb)
+  (set! *codes* (lambda () test-codes-state)))
 
 (define (login-password-correct? email given-password)
+  (ensure-initialized!)
   (log-racket-pkg-website/users-info "Checking password for ~v" email)
   (user-password-correct? (lookup-user userdb email) given-password))
 
 (define (send-registration-or-reset-email! email)
+  (ensure-initialized!)
   (if (user-exists? userdb email)
       (send-password-reset-email! email)
       (send-account-registration-email! email)))
 
 (define (sender-address)
-  (or (@ (config) email-sender-address)
-      "pkgs@racket-lang.org"))
-
-(log-racket-pkg-website/users-info "Will use sender address ~v" (sender-address))
+  (or (@ (config) email-sender-address) "pkgs@racket-lang.org"))
 
 (define (send-password-reset-email! email)
   (log-racket-pkg-website/users-info "Sending password reset email to ~v" email)
@@ -60,25 +72,21 @@
    (sender-address)
    "Account confirmation for Racket Package Catalog"
    (list email)
-   (list
-    "Someone tried to register your email address for an account on the Racket Package Catalog."
-    "If you want to proceed, use this code:"
-    ""
-    (generate-registration-code! (*codes*) email)
-    ""
-    "This code will expire, so if it is not available, you'll have to try to register again.")))
+   (list "Someone tried to register your email address for an account on the Racket Package Catalog."
+         "If you want to proceed, use this code:"
+         ""
+         (generate-registration-code! (*codes*) email)
+         ""
+         "This code will expire, so if it is not available, you'll have to try to register again.")))
 
 (define (registration-code-correct? email given-code)
+  (ensure-initialized!)
   (log-racket-pkg-website/users-info "Checking registration code for ~v" email)
-  (check-registration-code (*codes*)
-                           email
-                           given-code
-                           (lambda () #t)
-                           (lambda () #f)))
+  (check-registration-code (*codes*) email given-code (lambda () #t) (lambda () #f)))
 
 (define (register-or-update-user! email password)
+  (ensure-initialized!)
   (log-racket-pkg-website/users-info "Updating user record ~v" email)
   (save-user! userdb
-              (user-password-set (or (lookup-user userdb email)
-                                     (make-user email password))
+              (user-password-set (or (lookup-user userdb email) (make-user email password))
                                  password)))

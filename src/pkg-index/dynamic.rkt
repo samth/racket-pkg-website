@@ -414,6 +414,7 @@
    [else redirect-to-static]))
 
 (define (go)
+  (initialize!)
   (define port (get-config port default-pkg-index-port))
   (define ssl? (get-config ssl? #t))
   (log! "launching on port ~v" port)
