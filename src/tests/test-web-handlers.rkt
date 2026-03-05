@@ -70,3 +70,9 @@
 (test-case "handler: package page renders for nonexistent package"
   (define result (tester "/package/nonexistent-test-pkg-xyz" #:raw? #t #:headers? #t))
   (check-not-false (member (result-status result) '(200 404))))
+
+(test-case "handler: account page redirects to login when unauthenticated"
+  (define result (tester "/account" #:raw? #t #:headers? #t))
+  (define status (result-status result))
+  (check-not-false (or (and (>= status 300) (< status 400))
+                       (string-contains? (result-body result) "Log in"))))
