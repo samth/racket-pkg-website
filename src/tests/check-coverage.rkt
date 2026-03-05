@@ -16,7 +16,7 @@
 (define thresholds
   '(("sessions.rkt" . 95) ("users.rkt" . 80)
                           ("pkg-index/common.rkt" . 60)
-                          ("pkg-index/api.rkt" . 45)))
+                          ("pkg-index/api.rkt" . 90)))
 
 ;; Test files to run
 (define test-files
