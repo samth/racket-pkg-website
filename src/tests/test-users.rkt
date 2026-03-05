@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require rackunit
+         racket/string
          infrastructure-userdb
          "../users.rkt"
          (submod "../users.rkt" for-testing)
@@ -177,3 +178,60 @@
                            (unlink-github-account! "user@example.com")
                            (check-false (lookup-user-by-github-id 12345))
                            (check-false (github-username-for-email "user@example.com")))))
+
+;; API token tests
+
+(test-case "generate-api-token! returns token with rpkg_ prefix"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define token (generate-api-token! "user@example.com" "test token"))
+                           (check-pred string? token)
+                           (check-not-false (string-prefix? token "rpkg_")))))
+
+(test-case "validate-api-token finds valid token"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define token (generate-api-token! "user@example.com" "test"))
+                           (check-equal? (validate-api-token token) "user@example.com"))))
+
+(test-case "validate-api-token rejects unknown token"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-false (validate-api-token "rpkg_fakefakefake")))))
+
+(test-case "revoke-api-token! invalidates token"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define token (generate-api-token! "user@example.com" "to-revoke"))
+                           (check-equal? (validate-api-token token) "user@example.com")
+                           (define tokens-info (list-api-tokens "user@example.com"))
+                           (define hash-prefix (car (car tokens-info)))
+                           (check-equal? (revoke-api-token! "user@example.com" hash-prefix) 1)
+                           (check-false (validate-api-token token)))))
+
+(test-case "list-api-tokens returns metadata"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (generate-api-token! "user@example.com" "my-token")
+                           (define tokens (list-api-tokens "user@example.com"))
+                           (check-equal? (length tokens) 1)
+                           (define tok (car tokens))
+                           (check-equal? (length tok) 3)
+                           ;; (hash-prefix label created-seconds)
+                           (check-pred string? (car tok))     ; hash prefix
+                           (check-equal? (cadr tok) "my-token") ; label
+                           (check-pred number? (caddr tok))))) ; created
+
+(test-case "multiple tokens for same user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define t1 (generate-api-token! "user@example.com" "token-1"))
+                           (define t2 (generate-api-token! "user@example.com" "token-2"))
+                           (check-equal? (validate-api-token t1) "user@example.com")
+                           (check-equal? (validate-api-token t2) "user@example.com")
+                           (check-equal? (length (list-api-tokens "user@example.com")) 2))))

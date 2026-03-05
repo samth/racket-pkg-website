@@ -14,6 +14,10 @@
          github-username-for-email
          user-exists?/email
          has-password?
+         generate-api-token!
+         revoke-api-token!
+         validate-api-token
+         list-api-tokens
          initialize-users!)
 
 (module+ for-testing
@@ -23,6 +27,8 @@
 (require reloadable)
 (require infrastructure-userdb)
 (require racket/random)
+(require racket/list)
+(require racket/string)
 (require file/sha1)
 (require "config.rkt")
 (require "hash-utils.rkt")
@@ -221,3 +227,79 @@
 (define (user-exists?/email email)
   (ensure-initialized!)
   (user-exists? userdb email))
+
+;; API token management
+
+;; In-memory cache: token-sha256-hex -> email
+(define token-cache (make-hash))
+
+(define (token-sha256 plaintext)
+  (bytes->hex-string (sha256-bytes (string->bytes/utf-8 plaintext))))
+
+(define (rebuild-token-cache!)
+  (hash-clear! token-cache)
+  (for ([email (in-list (list-users userdb))])
+    (define u (lookup-user userdb email (lambda _ #f)))
+    (when u
+      (define raw (user-property u 'api-tokens #f))
+      (define tokens (and raw (unwrap-property raw)))
+      (when (list? tokens)
+        (for ([tok (in-list tokens)])
+          (define hash-hex (if (list? tok) (car tok) tok))
+          (when (string? hash-hex)
+            (hash-set! token-cache hash-hex email)))))))
+
+(define (generate-api-token! email label)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email))
+  (unless u (error 'generate-api-token! "user ~a does not exist" email))
+  (define plaintext
+    (string-append "rpkg_" (bytes->hex-string (crypto-random-bytes 32))))
+  (define hash-hex (token-sha256 plaintext))
+  (define created (current-seconds))
+  (define entry (list hash-hex label created))
+  (define raw (user-property u 'api-tokens #f))
+  (define existing (let ([v (and raw (unwrap-property raw))])
+                     (if (list? v) v '())))
+  (save-user! userdb
+              (user-property-set u 'api-tokens (cons entry existing)))
+  (hash-set! token-cache hash-hex email)
+  plaintext)
+
+(define (revoke-api-token! email hash-prefix)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email))
+  (unless u (error 'revoke-api-token! "user ~a does not exist" email))
+  (define raw (user-property u 'api-tokens #f))
+  (define existing (let ([v (and raw (unwrap-property raw))])
+                     (if (list? v) v '())))
+  (define-values (removed kept)
+    (partition (lambda (tok)
+                 (define h (if (list? tok) (car tok) tok))
+                 (and (string? h) (string-prefix? h hash-prefix)))
+               existing))
+  (for ([tok (in-list removed)])
+    (define h (if (list? tok) (car tok) tok))
+    (when (string? h) (hash-remove! token-cache h)))
+  (save-user! userdb (user-property-set u 'api-tokens kept))
+  (length removed))
+
+(define (validate-api-token plaintext)
+  (ensure-initialized!)
+  (when (hash-empty? token-cache)
+    (rebuild-token-cache!))
+  (define hash-hex (token-sha256 plaintext))
+  (hash-ref token-cache hash-hex #f))
+
+(define (list-api-tokens email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email (lambda _ #f)))
+  (unless u '())
+  (define raw (user-property u 'api-tokens #f))
+  (define tokens (let ([v (and raw (unwrap-property raw))])
+                   (if (list? v) v '())))
+  (for/list ([tok (in-list tokens)]
+             #:when (and (list? tok) (= (length tok) 3)))
+    (list (substring (car tok) 0 (min 8 (string-length (car tok))))
+          (cadr tok)
+          (caddr tok))))

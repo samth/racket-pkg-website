@@ -7,6 +7,7 @@
          racket/file
          racket/list
          racket/match
+         racket/string
          web-server/dispatch
          web-server/http
          web-server/http/basic-auth
@@ -21,7 +22,8 @@
          "notify.rkt"
          "static.rkt"
          "update.rkt"
-         "../default.rkt")
+         "../default.rkt"
+         "../users.rkt")
 
 (module+ test
   (require rackunit))
@@ -96,16 +98,27 @@
                                [host (get-config redirect-to-static-host "pkgs.racket-lang.org")]
                                [port (get-config redirect-to-static-port 80)]))))))
 
+(define (request->bearer-token req)
+  (define auth-header
+    (headers-assq #"Authorization" (request-headers/raw req)))
+  (and auth-header
+       (let ([v (bytes->string/utf-8 (header-value auth-header))])
+         (and (string-prefix? v "Bearer ")
+              (substring v 7)))))
+
 (define (ensure-authenticate req body-fun)
   (match (request->basic-credentials req)
     [(cons email passwd)
      (ensure-authenticate/email+passwd (bytes->string/utf-8 email)
                                        (bytes->string/utf-8 passwd)
                                        body-fun)]
-    ;; TODO: things are structured awkwardly at the moment, but it'd
-    ;; be nice to have this generate 401 Authentication Required with
-    ;; a use of `make-basic-auth-header` to request credentials.
-    [_ "authentication-required"]))
+    [_
+     (define token (request->bearer-token req))
+     (define email (and token (validate-api-token token)))
+     (if email
+         (parameterize ([current-user email])
+           (body-fun))
+         "authentication-required")]))
 
 (define *cors-headers*
   (list (header #"Access-Control-Allow-Origin" #"*")
