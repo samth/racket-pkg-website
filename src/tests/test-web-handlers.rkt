@@ -76,3 +76,9 @@
   (define status (result-status result))
   (check-not-false (or (and (>= status 300) (< status 400))
                        (string-contains? (result-body result) "Log in"))))
+
+(test-case "handler: /auth/github without config shows error in login form"
+  ;; github-oauth-configured? returns #f since no config is set
+  (define result (tester "/auth/github" #:raw? #t #:headers? #t))
+  (check-equal? (result-status result) 200)
+  (check-not-false (string-contains? (result-body result) "not configured")))

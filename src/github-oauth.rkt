@@ -6,7 +6,8 @@
 (provide github-authorize-url
          github-exchange-code
          github-get-user-info
-         github-oauth-configured?)
+         github-oauth-configured?
+         validate-csrf-state!)
 
 (require net/http-easy
          net/uri-codec

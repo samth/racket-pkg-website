@@ -41,6 +41,7 @@
 (require "http-utils.rkt")
 (require "challenge.rkt")
 (require "users.rkt")
+(require "github-oauth.rkt")
 (require "display-name.rkt")
 (require "default.rkt")
 (require "version.rkt")
@@ -103,6 +104,8 @@
    [("login") login-page]
    [("register-or-reset") register-or-reset-page]
    [("logout") logout-page]
+   [("auth" "github") github-login-start]
+   [("auth" "github" "callback") github-login-callback]
    [("json" "search-completions") json-search-completions]
    [("json" "tag-search-completions") json-tag-search-completions]
    [("json" "formal-tags") json-formal-tags]
@@ -362,7 +365,7 @@
   (with-site-config
    (send/suspend/dispatch/dynamic
     (lambda (embed-url)
-      (bootstrap-response "Login"
+      (apply bootstrap-response "Login"
                           `(form ((class "form-horizontal")
                                   (method "post")
                                   (action ,(embed-url process-login-credentials))
@@ -382,7 +385,15 @@
                                (form-group 4 5
                                            `(div ((class "alert alert-danger"))
                                              (p ,error-message))))
-                            ,(form-group 4 5 (primary-button "Log in"))))))))
+                            ,(form-group 4 5 (primary-button "Log in")))
+                          (if (github-oauth-configured?)
+                              (list `(hr)
+                                    `(div ((class "text-center"))
+                                          (a ((href ,(named-url github-login-start))
+                                              (class "btn btn-default"))
+                                             ,(glyphicon 'log-in)
+                                             " Sign in with GitHub")))
+                              '()))))))
 
 (define (create-session-after-authentication-success! email)
   (ensure-user-id! email)
@@ -400,6 +411,7 @@
 (define (account-form [message #f] [message-class "alert-success"])
   (define email (current-email))
   (define user-id (user-id-for-email email))
+  (define gh-username (github-username-for-email email))
   (with-site-config
    (send/suspend/dispatch/dynamic
     (lambda (embed-url)
@@ -418,6 +430,24 @@
                        ,@(if user-id
                              `((dt "User ID") (dd (code ,user-id)))
                              '()))))
+         ,@(if (github-oauth-configured?)
+               `((div ((class "panel panel-default"))
+                      (div ((class "panel-heading"))
+                           (h3 ((class "panel-title")) "GitHub Account"))
+                      (div ((class "panel-body"))
+                           ,@(if gh-username
+                                 `((p "Linked to GitHub account: "
+                                      (strong ,gh-username))
+                                   (form ((method "post")
+                                          (action ,(embed-url process-github-unlink)))
+                                         (button ((type "submit")
+                                                  (class "btn btn-danger btn-sm"))
+                                                 "Unlink GitHub Account")))
+                                 `((p "No GitHub account linked.")
+                                   (a ((href ,(named-url github-login-start))
+                                       (class "btn btn-default"))
+                                      "Link GitHub Account"))))))
+               '())
          (div ((class "panel panel-default"))
               (div ((class "panel-heading")) (h3 ((class "panel-title")) "Change Password"))
               (div ((class "panel-body"))
@@ -449,6 +479,10 @@
      (register-or-update-user! email new_password)
      (account-form "Password changed successfully.")]))
 
+(define (process-github-unlink request)
+  (unlink-github-account! (current-email))
+  (account-form "GitHub account unlinked."))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define (process-login-credentials request)
@@ -459,6 +493,105 @@
          (login-form "Incorrect password, or nonexistent user.")]
         [else
          (create-session-after-authentication-success! email)]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GitHub OAuth handlers
+
+(define (github-callback-url)
+  (string-append dynamic-urlprefix "/auth/github/callback"))
+
+(define (github-login-start request)
+  (if (not (github-oauth-configured?))
+      (login-form "GitHub login is not configured.")
+      (redirect-to (github-authorize-url (github-callback-url)))))
+
+(define (github-login-callback request)
+  (define bindings (request-bindings request))
+  (define code (extract-binding/single 'code bindings))
+  (define state (extract-binding/single 'state bindings))
+  (cond
+    [(not (validate-csrf-state! state))
+     (login-form "Invalid or expired GitHub login request. Please try again.")]
+    [else
+     (define access-token (github-exchange-code code (github-callback-url)))
+     (cond
+       [(not access-token)
+        (login-form "GitHub login failed. Please try again.")]
+       [else
+        (define-values (github-id github-username verified-emails)
+          (github-get-user-info access-token))
+        (cond
+          [(not github-id)
+           (login-form "Could not retrieve your GitHub account information.")]
+          [(null? verified-emails)
+           (login-form "No verified email found on your GitHub account. Please verify an email on GitHub first.")]
+          [else
+           (github-login-complete! github-id github-username verified-emails)])])]))
+
+(define (github-login-complete! github-id github-username verified-emails)
+  ;; Case 1: GitHub ID already linked to an account
+  (define existing-email (lookup-user-by-github-id github-id))
+  (cond
+    [existing-email
+     (create-session-after-authentication-success! existing-email)]
+    [else
+     ;; Case 2: Check if any verified email matches an existing user
+     (define matching-email
+       (for/or ([email (in-list verified-emails)])
+         (and (user-exists?/email email) email)))
+     (cond
+       [matching-email
+        ;; Require password confirmation to link accounts
+        (github-link-account-flow matching-email github-id github-username
+                                  (car verified-emails))]
+       [else
+        ;; Case 3: New user - create account
+        (define email (car verified-emails))
+        (create-github-user! email github-id github-username email)
+        (create-session-after-authentication-success! email)])]))
+
+(define (github-link-account-flow email github-id github-username github-email
+                                  [error-message #f])
+  (with-site-config
+   (send/suspend/dispatch/dynamic
+    (lambda (embed-url)
+      (bootstrap-response
+       "Link GitHub Account"
+       `(div
+         (p "A Racket Package Catalog account already exists for "
+            (strong ,email) ".")
+         (p "Enter your password to link your GitHub account ("
+            (strong ,github-username) ") to this account.")
+         (form ((class "form-horizontal")
+                (method "post")
+                (action ,(embed-url
+                          (lambda (request)
+                            (process-github-link request email github-id
+                                                 github-username github-email))))
+                (role "form"))
+               ,(form-group 2 3 (label "password" "Password")
+                            0 5 (password-input "password"))
+               ,@(maybe-splice
+                  error-message
+                  (form-group 5 5
+                              `(div ((class "alert alert-danger"))
+                                (p ,error-message))))
+               ,(form-group 5 5 (primary-button "Link Account & Sign In")))))))))
+
+(define (process-github-link request email github-id github-username github-email)
+  (define-form-bindings/trim request (password))
+  (cond
+    [(equal? password "")
+     (github-link-account-flow email github-id github-username github-email
+                               "Please enter your password.")]
+    [(not (login-password-correct? email password))
+     (github-link-account-flow email github-id github-username github-email
+                               "Incorrect password.")]
+    [else
+     (link-github-account! email github-id github-username github-email)
+     (create-session-after-authentication-success! email)]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define (register-form #:email [email ""]
                        #:email_for_code [email_for_code ""]

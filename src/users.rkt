@@ -9,7 +9,9 @@
          user-id-for-email
          lookup-user-by-github-id
          link-github-account!
+         unlink-github-account!
          create-github-user!
+         github-username-for-email
          user-exists?/email
          initialize-users!)
 
@@ -50,7 +52,9 @@
 
 (define (initialize-users-for-testing! test-userdb test-codes-state)
   (set! userdb test-userdb)
-  (set! *codes* (lambda () test-codes-state)))
+  (set! *codes* (lambda () test-codes-state))
+  (hash-clear! github-id-cache)
+  (set! github-id-cache-built? #f))
 
 (define (login-password-correct? email given-password)
   (ensure-initialized!)
@@ -148,19 +152,22 @@
 
 ;; In-memory cache: github-id (number) -> email (string)
 (define github-id-cache (make-hash))
+(define github-id-cache-built? #f)
 
 (define (rebuild-github-id-cache!)
   (hash-clear! github-id-cache)
   (for ([email (in-list (list-users userdb))])
     (define u (lookup-user userdb email (lambda _ #f)))
     (when u
-      (define gid (user-property u 'github-id #f))
+      (define raw (user-property u 'github-id #f))
+      (define gid (and raw (unwrap-property raw)))
       (when gid
-        (hash-set! github-id-cache (unwrap-property gid) email)))))
+        (hash-set! github-id-cache gid email))))
+  (set! github-id-cache-built? #t))
 
 (define (lookup-user-by-github-id github-id)
   (ensure-initialized!)
-  (when (hash-empty? github-id-cache)
+  (unless github-id-cache-built?
     (rebuild-github-id-cache!))
   (hash-ref github-id-cache github-id #f))
 
@@ -168,6 +175,11 @@
   (ensure-initialized!)
   (define u (lookup-user userdb email))
   (unless u (error 'link-github-account! "user ~a does not exist" email))
+  (define old-gid (user-property u 'github-id #f))
+  (when old-gid
+    (define old-gid* (unwrap-property old-gid))
+    (when (and old-gid* (not (equal? old-gid* github-id)))
+      (hash-remove! github-id-cache old-gid*)))
   (save-user! userdb
               (user-property-set
                (user-property-set
@@ -187,6 +199,25 @@
                 'github-username github-username)
                'github-email github-email))
   (hash-set! github-id-cache github-id email))
+
+(define (unlink-github-account! email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email))
+  (unless u (error 'unlink-github-account! "user ~a does not exist" email))
+  (define gid (user-property u 'github-id #f))
+  (when gid (hash-remove! github-id-cache (unwrap-property gid)))
+  (save-user! userdb
+              (user-property-set
+               (user-property-set
+                (user-property-set u 'github-id #f)
+                'github-username #f)
+               'github-email #f)))
+
+(define (github-username-for-email email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email (lambda _ #f)))
+  (define v (and u (user-property u 'github-username #f)))
+  (and v (unwrap-property v)))
 
 (define (user-exists?/email email)
   (ensure-initialized!)

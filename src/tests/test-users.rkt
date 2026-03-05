@@ -159,3 +159,21 @@
                            (create-github-user! "ghuser@example.com" 99999 "ghuser" "ghuser@example.com")
                            (check-false (login-password-correct? "ghuser@example.com" ""))
                            (check-false (login-password-correct? "ghuser@example.com" "password")))))
+
+(test-case "github-username-for-email returns username after linking"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-false (github-username-for-email "user@example.com"))
+                           (link-github-account! "user@example.com" 12345 "ghuser" "user@example.com")
+                           (check-equal? (github-username-for-email "user@example.com") "ghuser"))))
+
+(test-case "unlink-github-account! removes GitHub identity"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (link-github-account! "user@example.com" 12345 "ghuser" "user@example.com")
+                           (check-equal? (lookup-user-by-github-id 12345) "user@example.com")
+                           (unlink-github-account! "user@example.com")
+                           (check-false (lookup-user-by-github-id 12345))
+                           (check-false (github-username-for-email "user@example.com")))))
