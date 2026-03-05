@@ -140,4 +140,5 @@
 (module+ for-testing
   (provide generate-csrf-state!
            validate-csrf-state!
+           expire-csrf-states!
            csrf-states))

@@ -30,20 +30,21 @@
     ("bootstrap.rkt"       . 80)
     ("html-utils.rkt"      . 75)
     ("config.rkt"          . 75)
-    ;; Feature modules
-    ("package-source.rkt"  . 55)
-    ("rpc.rkt"             . 55)
-    ("challenge.rkt"       . 45)
+    ;; Feature modules (well-tested pure functions)
+    ("version.rkt"         . 95)
+    ("challenge.rkt"       . 95)
+    ("default.rkt"         . 95)
+    ("gravatar.rkt"        . 90)
+    ("display-name.rkt"    . 90)
+    ("package-source.rkt"  . 85)
+    ("rpc.rkt"             . 80)
+    ;; Feature modules (harder to test in-process)
     ("packages.rkt"        . 40)
-    ("display-name.rkt"    . 35)
-    ("default.rkt"         . 35)
-    ("github-oauth.rkt"    . 25)
+    ("github-oauth.rkt"    . 30)
     ("site.rkt"            . 25)
     ;; Backend modules
     ("pkg-index/dynamic.rkt" . 10)
-    ;; Low coverage — mostly side-effectful or hard to test in-process
-    ("gravatar.rkt"        . 15)
-    ("version.rkt"         . 5)
+    ;; Side-effectful, requires external services
     ("send-email.rkt"      . 0)))
 
 ;; Test files to run
@@ -53,7 +54,8 @@
     "src/tests/test-auth-api.rkt"
     "src/tests/test-web-handlers.rkt"
     "src/tests/test-github-oauth.rkt"
-    "src/tests/test-smoke.rkt"))
+    "src/tests/test-smoke.rkt"
+    "src/tests/test-utils.rkt"))
 
 ;; Source files to instrument
 (define source-files
