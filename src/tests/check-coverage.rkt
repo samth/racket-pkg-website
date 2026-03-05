@@ -16,7 +16,7 @@
 (define thresholds
   '(("sessions.rkt" . 95) ("users.rkt" . 80)
                           ("pkg-index/common.rkt" . 60)
-                          ("pkg-index/dynamic.rkt" . 45)))
+                          ("pkg-index/api.rkt" . 45)))
 
 ;; Test files to run
 (define test-files
@@ -26,7 +26,7 @@
 
 ;; Source files to instrument
 (define source-files
-  '("src/sessions.rkt" "src/users.rkt" "src/pkg-index/common.rkt" "src/pkg-index/dynamic.rkt"))
+  '("src/sessions.rkt" "src/users.rkt" "src/pkg-index/common.rkt" "src/pkg-index/api.rkt"))
 
 (define cover-dir (build-path (find-system-path 'temp-dir) "cover-ci"))
 
