@@ -175,5 +175,28 @@
 (define (set-userdb-for-testing! db)
   (set! userdb db))
 
-(provide (all-defined-out))
+(define (initialize-for-testing! #:pkgs-path test-pkgs-path
+                                 #:userdb test-userdb
+                                 #:static-path [test-static-path #f])
+  (define tmp-static (or test-static-path (make-temporary-directory)))
+  (set! pkgs-path (if (path? test-pkgs-path) (path->string test-pkgs-path) test-pkgs-path))
+  (set! userdb test-userdb)
+  (set! static-path (if (path? tmp-static) (path->string tmp-static) tmp-static))
+  (make-directory* static-path)
+  (set! notice-path (build-path static-path "notice.json"))
+  (set! cache-path (build-path static-path "cache"))
+  (make-directory* cache-path)
+  (set! SUMMARY-PATH (build-path cache-path SUMMARY-NAME))
+  (set! static.src-path (build-path static-path "static-src"))
+  (make-directory* static.src-path))
+
+(provide (except-out (all-defined-out)
+                     set-pkgs-path-for-testing!
+                     set-userdb-for-testing!
+                     initialize-for-testing!))
 (provide (all-from-out "config.rkt"))
+
+(module+ for-testing
+  (provide set-pkgs-path-for-testing!
+           set-userdb-for-testing!
+           initialize-for-testing!))

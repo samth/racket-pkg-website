@@ -3,6 +3,7 @@
 (require rackunit
          web-server/http/cookie-parse
          "../sessions.rkt"
+         (submod "../sessions.rkt" for-testing)
          "test-helpers.rkt")
 
 (test-case "create-session! returns a string key"

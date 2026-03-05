@@ -7,9 +7,11 @@
          create-session!
          destroy-session!
          lookup-session/touch!
-         lookup-session
-         expire-sessions!
-         sessions)
+         lookup-session)
+
+(module+ for-testing
+  (provide expire-sessions!
+           sessions))
 
 (require "randomness.rkt")
 (require "config.rkt")

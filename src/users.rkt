@@ -5,8 +5,10 @@
          send-registration-or-reset-email!
          registration-code-correct?
          register-or-update-user!
-         initialize-users!
-         initialize-users-for-testing!)
+         initialize-users!)
+
+(module+ for-testing
+  (provide initialize-users-for-testing!))
 
 (require reloadable)
 (require infrastructure-userdb)

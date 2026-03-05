@@ -3,6 +3,7 @@
 (require rackunit
          infrastructure-userdb
          "../users.rkt"
+         (submod "../users.rkt" for-testing)
          "test-helpers.rkt")
 
 (test-case "register-or-update-user! creates a user"

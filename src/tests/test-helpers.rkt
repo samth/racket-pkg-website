@@ -13,7 +13,8 @@
          infrastructure-userdb
          web-server/http/request-structs
          "../sessions.rkt"
-         "../pkg-index/common.rkt")
+         "../pkg-index/common.rkt"
+         (submod "../pkg-index/common.rkt" for-testing))
 
 ;; Run thunk with a temporary userdb directory.
 ;; The thunk receives the userdb as its argument.
@@ -63,11 +64,17 @@
   (parameterize ([current-session s])
     (thunk)))
 
-;; Run thunk with a temporary packages directory.
+;; Run thunk with a temporary packages directory and related state
+;; (notice-path, static-path, cache-path) initialized for testing.
 (define (call-with-test-packages-dir thunk)
   (define tmp (make-temporary-directory))
+  (define tmp-static (make-temporary-directory))
   (dynamic-wind void
                 (lambda ()
-                  (set-pkgs-path-for-testing! tmp)
+                  (initialize-for-testing! #:pkgs-path tmp
+                                           #:userdb #f
+                                           #:static-path tmp-static)
                   (thunk tmp))
-                (lambda () (delete-directory/files tmp))))
+                (lambda ()
+                  (delete-directory/files tmp)
+                  (delete-directory/files tmp-static))))

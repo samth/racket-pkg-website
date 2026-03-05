@@ -7,6 +7,8 @@
          save-package!
          curate-packages!
          package-author?
+         package-remove!
+         packages-of
          ensure-authenticate/email+passwd)
 
 (require file/sha1
