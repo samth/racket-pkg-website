@@ -5,6 +5,8 @@
          send-registration-or-reset-email!
          registration-code-correct?
          register-or-update-user!
+         ensure-user-id!
+         user-id-for-email
          initialize-users!)
 
 (module+ for-testing
@@ -13,6 +15,8 @@
 
 (require reloadable)
 (require infrastructure-userdb)
+(require racket/random)
+(require file/sha1)
 (require "config.rkt")
 (require "hash-utils.rkt")
 (require "default.rkt")
@@ -96,3 +100,42 @@
   (save-user! userdb
               (user-password-set (or (lookup-user userdb email) (make-user email password))
                                  password)))
+
+(define (generate-user-id)
+  (define bs (crypto-random-bytes 16))
+  ;; Format as UUID v4: set version bits (byte 6) and variant bits (byte 8)
+  (bytes-set! bs 6 (bitwise-ior #x40 (bitwise-and #x0f (bytes-ref bs 6))))
+  (bytes-set! bs 8 (bitwise-ior #x80 (bitwise-and #x3f (bytes-ref bs 8))))
+  (define h (bytes->hex-string bs))
+  (format "~a-~a-~a-~a-~a"
+          (substring h 0 8)
+          (substring h 8 12)
+          (substring h 12 16)
+          (substring h 16 20)
+          (substring h 20 32)))
+
+;; user-property values survive a save/load round-trip as single-element lists
+;; because the serialization format uses (list key value) pairs.
+;; This helper normalizes either form to a plain value.
+(define (unwrap-property v)
+  (if (and (pair? v) (null? (cdr v)))
+      (car v)
+      v))
+
+(define (ensure-user-id! email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email))
+  (unless u (error 'ensure-user-id! "user ~a does not exist" email))
+  (define existing (user-property u 'user-id #f))
+  (cond
+    [existing (unwrap-property existing)]
+    [else
+     (define id (generate-user-id))
+     (save-user! userdb (user-property-set u 'user-id id))
+     id]))
+
+(define (user-id-for-email email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email (lambda _ #f)))
+  (define v (and u (user-property u 'user-id #f)))
+  (and v (unwrap-property v)))
