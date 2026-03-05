@@ -299,12 +299,14 @@
 (define (list-api-tokens email)
   (ensure-initialized!)
   (define u (lookup-user userdb email (lambda _ #f)))
-  (unless u '())
-  (define raw (user-property u 'api-tokens #f))
-  (define tokens (let ([v (and raw (unwrap-property raw))])
-                   (if (list? v) v '())))
-  (for/list ([tok (in-list tokens)]
-             #:when (and (list? tok) (= (length tok) 3)))
-    (list (substring (car tok) 0 (min 8 (string-length (car tok))))
-          (cadr tok)
-          (caddr tok))))
+  (cond
+    [(not u) '()]
+    [else
+     (define raw (user-property u 'api-tokens #f))
+     (define tokens (let ([v (and raw (unwrap-property raw))])
+                      (if (list? v) v '())))
+     (for/list ([tok (in-list tokens)]
+                #:when (and (list? tok) (= (length tok) 3)))
+       (list (substring (car tok) 0 (min 8 (string-length (car tok))))
+             (cadr tok)
+             (caddr tok)))]))
