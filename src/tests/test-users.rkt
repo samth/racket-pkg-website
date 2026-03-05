@@ -130,3 +130,32 @@
        (send-registration-or-reset-email! "newuser@example.com"))
      (check-equal? (length sent-subjects) 1)
      (check-not-false (regexp-match #rx"confirmation" (car sent-subjects))))))
+
+;; GitHub identity tests
+
+(test-case "lookup-user-by-github-id returns #f when no users have GitHub IDs"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-false (lookup-user-by-github-id 12345)))))
+
+(test-case "link-github-account! stores GitHub identity"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (link-github-account! "user@example.com" 12345 "ghuser" "user@example.com")
+                           (check-equal? (lookup-user-by-github-id 12345) "user@example.com"))))
+
+(test-case "create-github-user! creates user with GitHub identity"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (create-github-user! "ghuser@example.com" 99999 "ghuser" "ghuser@example.com")
+                           (check-true (user-exists?/email "ghuser@example.com"))
+                           (check-equal? (lookup-user-by-github-id 99999) "ghuser@example.com"))))
+
+(test-case "create-github-user! user cannot login with guessed password"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (create-github-user! "ghuser@example.com" 99999 "ghuser" "ghuser@example.com")
+                           (check-false (login-password-correct? "ghuser@example.com" ""))
+                           (check-false (login-password-correct? "ghuser@example.com" "password")))))

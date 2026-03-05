@@ -7,6 +7,10 @@
          register-or-update-user!
          ensure-user-id!
          user-id-for-email
+         lookup-user-by-github-id
+         link-github-account!
+         create-github-user!
+         user-exists?/email
          initialize-users!)
 
 (module+ for-testing
@@ -139,3 +143,51 @@
   (define u (lookup-user userdb email (lambda _ #f)))
   (define v (and u (user-property u 'user-id #f)))
   (and v (unwrap-property v)))
+
+;; GitHub identity storage
+
+;; In-memory cache: github-id (number) -> email (string)
+(define github-id-cache (make-hash))
+
+(define (rebuild-github-id-cache!)
+  (hash-clear! github-id-cache)
+  (for ([email (in-list (list-users userdb))])
+    (define u (lookup-user userdb email (lambda _ #f)))
+    (when u
+      (define gid (user-property u 'github-id #f))
+      (when gid
+        (hash-set! github-id-cache (unwrap-property gid) email)))))
+
+(define (lookup-user-by-github-id github-id)
+  (ensure-initialized!)
+  (when (hash-empty? github-id-cache)
+    (rebuild-github-id-cache!))
+  (hash-ref github-id-cache github-id #f))
+
+(define (link-github-account! email github-id github-username github-email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email))
+  (unless u (error 'link-github-account! "user ~a does not exist" email))
+  (save-user! userdb
+              (user-property-set
+               (user-property-set
+                (user-property-set u 'github-id github-id)
+                'github-username github-username)
+               'github-email github-email))
+  (hash-set! github-id-cache github-id email))
+
+(define (create-github-user! email github-id github-username github-email)
+  (ensure-initialized!)
+  (define random-password (bytes->hex-string (crypto-random-bytes 32)))
+  (define u (make-user email random-password))
+  (save-user! userdb
+              (user-property-set
+               (user-property-set
+                (user-property-set u 'github-id github-id)
+                'github-username github-username)
+               'github-email github-email))
+  (hash-set! github-id-cache github-id email))
+
+(define (user-exists?/email email)
+  (ensure-initialized!)
+  (user-exists? userdb email))
