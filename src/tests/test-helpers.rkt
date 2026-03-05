@@ -59,7 +59,7 @@
 
 ;; Run thunk with a test session set up for the given email.
 (define (with-test-session email thunk #:curator? [curator? #f] #:superuser? [superuser? #f])
-  (define key (create-session! email "test-password" #:curator? curator? #:superuser? superuser?))
+  (define key (create-session! email #:curator? curator? #:superuser? superuser?))
   (define s (lookup-session/touch! key))
   (parameterize ([current-session s])
     (thunk)))

@@ -386,7 +386,7 @@
   (define user-facts (authenticate-user email password))
   (when (not (hash? user-facts))
     (error 'create-session-after-authentication-success! "Cannot retrieve user-facts for ~v" email))
-  (create-session! email password
+  (create-session! email
                    #:curator? (if (hash-ref user-facts 'curation #f) #t #f)
                    #:superuser? (if (hash-ref user-facts 'superuser #f) #t #f)))
 
