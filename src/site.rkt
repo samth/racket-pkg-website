@@ -461,7 +461,74 @@
                                       0 5 (password-input "new_password"))
                          ,(form-group 2 3 (label "confirm_password" "Confirm new password")
                                       0 5 (password-input "confirm_password"))
-                         ,(form-group 5 5 (primary-button "Change Password")))))))))))
+                         ,(form-group 5 5 (primary-button "Change Password")))))
+         ,(token-management-panel email embed-url)))))))
+
+(define (token-management-panel email embed-url)
+  (define tokens (list-api-tokens email))
+  `(div ((class "panel panel-default"))
+        (div ((class "panel-heading")) (h3 ((class "panel-title")) "API Tokens"))
+        (div ((class "panel-body"))
+             ,@(if (null? tokens)
+                   `((p "No API tokens."))
+                   `((table ((class "table table-striped"))
+                            (thead (tr (th "Label") (th "Created") (th "Hash Prefix") (th "")))
+                            (tbody
+                             ,@(for/list ([tok (in-list tokens)])
+                                 (define hash-prefix (car tok))
+                                 (define tok-label (cadr tok))
+                                 (define created (caddr tok))
+                                 `(tr (td ,tok-label)
+                                      (td ,(date->string (seconds->date created) #t))
+                                      (td (code ,hash-prefix))
+                                      (td (form ((method "post")
+                                                 (action ,(embed-url
+                                                           (process-token-revoke hash-prefix)))
+                                                 (style "display:inline"))
+                                                (button ((type "submit")
+                                                         (class "btn btn-danger btn-xs"))
+                                                        "Revoke")))))))))
+             (hr)
+             (form ((class "form-inline")
+                    (method "post")
+                    (action ,(embed-url process-token-generate))
+                    (role "form"))
+                   (div ((class "form-group"))
+                        ,(label "token_label" "Label ")
+                        ,(text-input "token_label" #:placeholder "e.g. CI deploy"))
+                   " "
+                   (button ((type "submit") (class "btn btn-primary")) "Generate Token")))))
+
+(define (process-token-generate request)
+  (define-form-bindings/trim request (token_label))
+  (define email (current-email))
+  (cond
+    [(equal? token_label "")
+     (account-form "Please provide a label for the token." "alert-danger")]
+    [else
+     (define plaintext (generate-api-token! email token_label))
+     (account-form-with-token plaintext)]))
+
+(define (account-form-with-token plaintext)
+  (with-site-config
+   (send/suspend/dispatch/dynamic
+    (lambda (embed-url)
+      (bootstrap-response
+       "Account Settings"
+       `(div
+         (div ((class "alert alert-success"))
+              (p (strong "Your new API token has been generated."))
+              (p "Copy it now — it will not be shown again:")
+              (pre ((class "well")) ,plaintext))
+         (p (a ((href ,(embed-url (lambda (_) (account-form)))))
+               "Continue to Account Settings"))))))))
+
+(define ((process-token-revoke hash-prefix) request)
+  (define email (current-email))
+  (define count (revoke-api-token! email hash-prefix))
+  (if (> count 0)
+      (account-form (format "Token revoked (~a removed)." count))
+      (account-form "No matching token found." "alert-danger")))
 
 (define (process-password-change request)
   (define-form-bindings/trim request (current_password new_password confirm_password))
