@@ -25,3 +25,22 @@ jobs:
 
       - name: Run tests
         run: raco test -y src/tests/
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1.14
+        with:
+          version: '9.1'
+          dest: '/opt/racket'
+          sudo: never
+          packages: 'https://github.com/racket/infrastructure-userdb.git#main, reloadable, aws, s3-sync, plt-service-monitor, http-easy, cover'
+
+      - name: Generate SSL keys
+        run: make keys
+
+      - name: Check coverage
+        run: racket -y src/tests/check-coverage.rkt
