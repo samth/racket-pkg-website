@@ -236,6 +236,65 @@
                            (check-equal? (validate-api-token t2) "user@example.com")
                            (check-equal? (length (list-api-tokens "user@example.com")) 2))))
 
+;; has-password? tests
+
+(test-case "has-password? returns #t after register-or-update-user!"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-true (has-password? "user@example.com")))))
+
+(test-case "has-password? returns #f for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-false (has-password? "nobody@example.com")))))
+
+(test-case "has-password? returns #f for GitHub-created user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (create-github-user! "ghonly@example.com" 55555 "ghonly" "ghonly@example.com")
+                           (check-false (has-password? "ghonly@example.com")))))
+
+(test-case "has-password? returns #t after GitHub user sets password"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (create-github-user! "ghuser@example.com" 55555 "ghuser" "ghuser@example.com")
+                           (check-false (has-password? "ghuser@example.com"))
+                           (register-or-update-user! "ghuser@example.com" "newpass")
+                           (check-true (has-password? "ghuser@example.com")))))
+
+;; Error path tests
+
+(test-case "link-github-account! errors for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-exn exn:fail?
+                                      (lambda () (link-github-account! "nobody@example.com" 123 "gh" "gh@x.com"))))))
+
+(test-case "unlink-github-account! errors for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-exn exn:fail?
+                                      (lambda () (unlink-github-account! "nobody@example.com"))))))
+
+(test-case "generate-api-token! errors for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-exn exn:fail?
+                                      (lambda () (generate-api-token! "nobody@example.com" "test"))))))
+
+(test-case "revoke-api-token! errors for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-exn exn:fail?
+                                      (lambda () (revoke-api-token! "nobody@example.com" "abcd"))))))
+
+(test-case "revoke-api-token! returns 0 when no token matches"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-equal? (revoke-api-token! "user@example.com" "nonexistent") 0))))
+
 ;; --- Return type tests ---
 ;; These verify that functions return the correct types, not wrapped
 ;; in extra lists from the userdb property storage format.

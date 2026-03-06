@@ -18,7 +18,7 @@
 (define thresholds
   '(;; Core auth modules (high coverage)
     ("sessions.rkt"        . 95)
-    ("users.rkt"           . 73)
+    ("users.rkt"           . 80)
     ("pkg-index/api.rkt"   . 90)
     ("pkg-index/common.rkt" . 60)
     ;; Utility modules
