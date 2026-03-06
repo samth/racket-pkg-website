@@ -134,21 +134,13 @@
           (substring h 16 20)
           (substring h 20 32)))
 
-;; user-property values survive a save/load round-trip as single-element lists
-;; because the serialization format uses (list key value) pairs.
-;; This helper normalizes either form to a plain value.
-(define (unwrap-property v)
-  (if (and (pair? v) (null? (cdr v)))
-      (car v)
-      v))
-
 (define (ensure-user-id! email)
   (ensure-initialized!)
   (define u (lookup-user userdb email))
   (unless u (error 'ensure-user-id! "user ~a does not exist" email))
   (define existing (user-property u 'user-id #f))
   (cond
-    [existing (unwrap-property existing)]
+    [existing existing]
     [else
      (define id (generate-user-id))
      (save-user! userdb (user-property-set u 'user-id id))
@@ -158,7 +150,7 @@
   (ensure-initialized!)
   (define u (lookup-user userdb email (lambda _ #f)))
   (define v (and u (user-property u 'user-id #f)))
-  (and v (unwrap-property v)))
+  v)
 
 ;; GitHub identity storage
 
@@ -170,8 +162,7 @@
   (for ([email (in-list (list-users userdb))])
     (define u (lookup-user userdb email (lambda _ #f)))
     (when u
-      (define raw (user-property u 'github-id #f))
-      (define gid (and raw (unwrap-property raw)))
+      (define gid (user-property u 'github-id #f))
       (when gid
         (hash-set! github-id-cache gid email)))))
 
@@ -210,7 +201,7 @@
   (define u (lookup-user userdb email))
   (unless u (error 'unlink-github-account! "user ~a does not exist" email))
   (define gid (user-property u 'github-id #f))
-  (when gid (hash-remove! github-id-cache (unwrap-property gid)))
+  (when gid (hash-remove! github-id-cache gid))
   (save-user! userdb
               (user-property-set
                (user-property-set
@@ -221,8 +212,7 @@
 (define (github-username-for-email email)
   (ensure-initialized!)
   (define u (lookup-user userdb email (lambda _ #f)))
-  (define v (and u (user-property u 'github-username #f)))
-  (and v (unwrap-property v)))
+  (and u (user-property u 'github-username #f)))
 
 (define (user-exists?/email email)
   (ensure-initialized!)
@@ -241,8 +231,7 @@
   (for ([email (in-list (list-users userdb))])
     (define u (lookup-user userdb email (lambda _ #f)))
     (when u
-      (define raw (user-property u 'api-tokens #f))
-      (define tokens (and raw (unwrap-property raw)))
+      (define tokens (user-property u 'api-tokens #f))
       (when (list? tokens)
         (for ([tok (in-list tokens)])
           (define hash-hex (if (list? tok) (car tok) tok))
@@ -258,8 +247,7 @@
   (define hash-hex (token-sha256 plaintext))
   (define created (current-seconds))
   (define entry (list hash-hex label created))
-  (define raw (user-property u 'api-tokens #f))
-  (define existing (let ([v (and raw (unwrap-property raw))])
+  (define existing (let ([v (user-property u 'api-tokens #f)])
                      (if (list? v) v '())))
   (save-user! userdb
               (user-property-set u 'api-tokens (cons entry existing)))
@@ -270,8 +258,7 @@
   (ensure-initialized!)
   (define u (lookup-user userdb email))
   (unless u (error 'revoke-api-token! "user ~a does not exist" email))
-  (define raw (user-property u 'api-tokens #f))
-  (define existing (let ([v (and raw (unwrap-property raw))])
+  (define existing (let ([v (user-property u 'api-tokens #f)])
                      (if (list? v) v '())))
   (define-values (removed kept)
     (partition (lambda (tok)
@@ -297,8 +284,7 @@
   (cond
     [(not u) '()]
     [else
-     (define raw (user-property u 'api-tokens #f))
-     (define tokens (let ([v (and raw (unwrap-property raw))])
+     (define tokens (let ([v (user-property u 'api-tokens #f)])
                       (if (list? v) v '())))
      (for/list ([tok (in-list tokens)]
                 #:when (and (list? tok) (= (length tok) 3)))
