@@ -15,10 +15,7 @@
          web-server/http/request-structs
          "../sessions.rkt"
          "../pkg-index/common.rkt"
-         (submod "../pkg-index/common.rkt" for-testing)
-         (submod "../pkg-index/update.rkt" for-testing)
-         (submod "../pkg-index/static.rkt" for-testing)
-         (submod "../pkg-index/s3.rkt" for-testing))
+         (submod "../pkg-index/common.rkt" for-testing))
 
 ;; Run thunk with a temporary userdb directory.
 ;; The thunk receives the userdb as its argument.
@@ -68,12 +65,10 @@
     (thunk)))
 
 ;; Wait for all background tasks (update, static, s3) to finish.
-;; Each task uses a semaphore with initial value 1; acquiring it
-;; ensures no task is currently running.
+;; Uses thread-wait on all threads spawned by safe-run!,
+;; looping to catch cascading spawns (update → static → s3).
 (define (drain-background-tasks!)
-  (for ([sema (list update-run-sema static-run-sema s3-run-sema)])
-    (semaphore-wait sema)
-    (semaphore-post sema)))
+  (drain-background-threads!))
 
 ;; Run thunk with a temporary packages directory and related state
 ;; (notice-path, static-path, cache-path) initialized for testing.

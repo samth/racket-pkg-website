@@ -387,6 +387,8 @@
                       #:source "https://github.com/test/del.git"
                       #:tags #f #:authors '("author@example.com") #:versions #f))
      (check-true (package-exists? "del-auth-pkg"))
+     ;; Wait for background tasks from save before deleting
+     (drain-background-tasks!)
      (check-true (delete-package!/authorized "author@example.com" "del-auth-pkg"))
      (check-false (package-exists? "del-auth-pkg")))))
 

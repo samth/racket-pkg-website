@@ -19,10 +19,13 @@
     (gzip src tmp)
     (rename-file-or-directory tmp dest #t))
 
-  (gzip/atomic (format "~a/pkgs-all.json" static-path)
-               (format "~a/pkgs-all.json.gz" static-path))
-
-  (delete-file (format "~a/pkgs-all.json" static-path))
+  (define pkgs-all-json (format "~a/pkgs-all.json" static-path))
+  ;; A prior upload cycle may have already gzipped and deleted this file.
+  ;; Only gzip if the source still exists.
+  (when (file-exists? pkgs-all-json)
+    (gzip/atomic pkgs-all-json
+                 (format "~a/pkgs-all.json.gz" static-path))
+    (delete-file pkgs-all-json))
 
   (if (eq? s3-bucket #f)
       (log! "upload: S3 synchronization is disabled by s3-bucket = #f in config")

@@ -108,10 +108,10 @@
   (cond
     [token token]
     [error-desc
-     (log-racket-pkg-website/github-oauth-error "GitHub OAuth error: ~a" error-desc)
+     (log-racket-pkg-website/github-oauth-warning "GitHub OAuth error: ~a" error-desc)
      #f]
     [else
-     (log-racket-pkg-website/github-oauth-error "GitHub OAuth: no access_token in response")
+     (log-racket-pkg-website/github-oauth-warning "GitHub OAuth: no access_token in response")
      #f]))
 
 ;; Fetch GitHub user info: returns (values github-id github-username verified-emails)
@@ -127,7 +127,7 @@
   (define github-username (and (hash? user-data) (hash-ref user-data 'login #f)))
   (cond
     [(not github-id)
-     (log-racket-pkg-website/github-oauth-error "GitHub API: no user id in response")
+     (log-racket-pkg-website/github-oauth-warning "GitHub API: no user id in response")
      (values #f #f #f)]
     [else
      ;; Get verified emails

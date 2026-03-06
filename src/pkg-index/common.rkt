@@ -140,13 +140,14 @@
 
 (define valid-tag? valid-name?)
 
+(define-logger racket-pkg-website)
+
 (define (log!* args suffix)
-  (parameterize ([date-display-format 'iso-8601])
-    (printf "~a: ~a~a" (date->string (current-date) #t) (apply format args) suffix)
-    (flush-output)))
+  (define msg (apply format args))
+  (log-racket-pkg-website-info "~a~a" msg suffix))
 
 (define (log! . args)
-  (log!* args "\n"))
+  (log!* args ""))
 
 (define (log!/no-newline . args)
   (log!* args ""))
@@ -156,13 +157,22 @@
   (f args)
   (log! "END ~a ~v" f args))
 
+;; Track background threads for drain-background-tasks!
+(define background-threads '())
+(define background-threads-lock (make-semaphore 1))
+
 (define (safe-run! run-sema t)
-  (thread (λ ()
-            (call-with-semaphore
-             run-sema
-             (λ ()
-               (with-handlers ([exn:fail? (λ (x) ((error-display-handler) (exn-message x) x))])
-                 (t)))))))
+  (define th
+    (thread (λ ()
+              (call-with-semaphore
+               run-sema
+               (λ ()
+                 (with-handlers ([exn:fail? (λ (x) ((error-display-handler) (exn-message x) x))])
+                   (t)))))))
+  (call-with-semaphore
+   background-threads-lock
+   (λ () (set! background-threads (cons th background-threads))))
+  th)
 
 (define (heartbeat task)
   (when beat-s3-bucket
@@ -196,7 +206,29 @@
                      initialize-for-testing!))
 (provide (all-from-out "config.rkt"))
 
+(define (drain-background-threads!)
+  (let loop ()
+    (define threads
+      (call-with-semaphore
+       background-threads-lock
+       (λ () background-threads)))
+    (for-each thread-wait threads)
+    ;; New threads may have been spawned by finished ones (update → static → s3).
+    ;; Check again; if no new threads appeared, we're done.
+    (define threads-after
+      (call-with-semaphore
+       background-threads-lock
+       (λ () background-threads)))
+    (unless (equal? (length threads) (length threads-after))
+      (loop))
+    ;; Clean up dead thread references
+    (call-with-semaphore
+     background-threads-lock
+     (λ () (set! background-threads
+                 (filter thread-running? background-threads))))))
+
 (module+ for-testing
   (provide set-pkgs-path-for-testing!
            set-userdb-for-testing!
-           initialize-for-testing!))
+           initialize-for-testing!
+           drain-background-threads!))
