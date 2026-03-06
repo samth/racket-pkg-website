@@ -20,10 +20,15 @@
 (define original-config (config-handler))
 
 ;; Read PAT from environment variable or local file (never committed).
-;; Tests that need a real token skip when neither is available.
+;; Tests that need a real token skip when neither is available or the token is invalid.
 (define-runtime-path pat-file "../../samth_pat.txt")
-(define github-pat
+(define github-pat-raw
   (or (getenv "GITHUB_PAT") (and (file-exists? pat-file) (string-trim (file->string pat-file)))))
+;; Validate the token actually works before using it for tests
+(define github-pat
+  (and github-pat-raw
+       (let-values ([(id _u _e) (github-get-user-info github-pat-raw)])
+         (and id github-pat-raw))))
 
 (test-case "github-oauth-configured? returns #f without config"
   (check-false (github-oauth-configured?)))
