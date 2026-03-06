@@ -1838,9 +1838,10 @@
                               (handle-message (thread-receive))))))
 
 (when (not (package-change-handler-thread))
-  (package-change-handler-thread (daemon-thread 'package-change-handler
-                                                (lambda () (package-change-handler (seteq)
-                                                                                   '()
-                                                                                   (seteq))))))
+  (void
+   (package-change-handler-thread (daemon-thread 'package-change-handler
+                                                 (lambda () (package-change-handler (seteq)
+                                                                                    '()
+                                                                                    (seteq)))))))
 
 (thread-send (package-change-handler-thread) 'upgrade) ;; switch to new code

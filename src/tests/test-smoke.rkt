@@ -74,11 +74,13 @@
                          (path->string tmp-users))
                  config-file)
 
-;; Start the server subprocess
+;; Start the server subprocess (suppress stdout/stderr noise)
+(define dev-null-out (open-output-file "/dev/null" #:exists 'append))
+(define dev-null-err (open-output-file "/dev/null" #:exists 'append))
 (define-values (proc proc-stdout proc-stdin proc-stderr)
-  (subprocess #f
+  (subprocess dev-null-out
               #f
-              (current-error-port)
+              dev-null-err
               racket-exe
               "-y"
               (path->string main-rkt)
@@ -93,12 +95,14 @@
     (close-input-port proc-stdout))
   (when proc-stdin
     (close-output-port proc-stdin))
+  (close-output-port dev-null-out)
+  (close-output-port dev-null-err)
   (delete-directory/files tmp-root #:must-exist? #f))
 
-(plumber-add-flush! (current-plumber) (lambda (_) (cleanup!)))
+(void (plumber-add-flush! (current-plumber) (lambda (_) (cleanup!))))
 
 ;; Wait for server to be ready
-(wait-for-server "127.0.0.1" test-port)
+(void (wait-for-server "127.0.0.1" test-port))
 
 (define (test-url path)
   (format "http://127.0.0.1:~a~a" test-port path))
