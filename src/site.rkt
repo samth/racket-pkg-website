@@ -517,13 +517,13 @@
     [(not (validate-csrf-state! state))
      (login-form "Invalid or expired GitHub login request. Please try again.")]
     [else
-     (define access-token (github-exchange-code code (github-callback-url)))
+     (define access-token ((current-github-exchange-code) code (github-callback-url)))
      (cond
        [(not access-token)
         (login-form "GitHub login failed. Please try again.")]
        [else
         (define-values (github-id github-username verified-emails)
-          (github-get-user-info access-token))
+          ((current-github-get-user-info) access-token))
         (cond
           [(not github-id)
            (login-form "Could not retrieve your GitHub account information.")]
@@ -532,12 +532,17 @@
           [else
            (github-login-complete! github-id github-username verified-emails)])])]))
 
+(define (github-login-success! email)
+  (with-session-cookie (create-session-after-authentication-success! email)
+    (with-site-config
+      (bootstrap-redirect (main-page-url)))))
+
 (define (github-login-complete! github-id github-username verified-emails)
   ;; Case 1: GitHub ID already linked to an account
   (define existing-email (lookup-user-by-github-id github-id))
   (cond
     [existing-email
-     (create-session-after-authentication-success! existing-email)]
+     (github-login-success! existing-email)]
     [else
      ;; Case 2: Check if any verified email matches an existing user
      (define matching-email
@@ -552,7 +557,7 @@
         ;; Case 3: New user - create account
         (define email (car verified-emails))
         (create-github-user! email github-id github-username email)
-        (create-session-after-authentication-success! email)])]))
+        (github-login-success! email)])]))
 
 (define (github-link-account-flow email github-id github-username github-email
                                   [error-message #f])
@@ -593,7 +598,7 @@
                                "Incorrect password.")]
     [else
      (link-github-account! email github-id github-username github-email)
-     (create-session-after-authentication-success! email)]))
+     (github-login-success! email)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
