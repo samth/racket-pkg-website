@@ -1246,3 +1246,228 @@
      (check-equal? (result-status result) 200)
      (check-not-false (string-contains? (result-body result) "Sign in with GitHub")
                       "login page should show GitHub sign-in button when configured"))))
+
+(test-case "github: full multi-step GitHub lifecycle"
+  ;; Mutable mock state: tests update these boxes to control what
+  ;; the mock GitHub API returns at each step.
+  (define mock-token (box "fake-token"))
+  (define mock-github-id (box 55555))
+  (define mock-github-username (box "octocat"))
+  (define mock-emails (box (list "octocat@example.com")))
+
+  (call-with-github-oauth
+   (lambda (code redirect-uri) (unbox mock-token))
+   (lambda (token) (values (unbox mock-github-id)
+                           (unbox mock-github-username)
+                           (unbox mock-emails)))
+   (lambda (db)
+     ;; ===== Step 1: New GitHub user logs in — account auto-created =====
+     (check-false (user-exists?/email "octocat@example.com")
+                  "step 1: user should not exist yet")
+
+     (define state1 (generate-csrf-state!))
+     (define result1 (tester (make-github-callback-request "code1" state1)
+                             #:raw? #t #:headers? #t))
+     (define headers1 (result-headers-str result1))
+     (check-not-false (string-contains? headers1 "pltsession=")
+                      "step 1: should set session cookie")
+
+     ;; Backend: user created with GitHub link
+     (check-not-false (user-exists?/email "octocat@example.com")
+                      "step 1: user should exist")
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 1: GitHub ID should be linked")
+     (check-equal? (github-username-for-email "octocat@example.com") "octocat"
+                   "step 1: GitHub username stored")
+     (define user-id (user-id-for-email "octocat@example.com"))
+     (check-not-false user-id "step 1: user-id should be assigned")
+
+     ;; ===== Step 2: Visit account page — shows GitHub info =====
+     (define session-key1 (create-session! "octocat@example.com"))
+     (define acct1 (tester (make-authenticated-request session-key1 #:url "/account")
+                           #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct1) 200)
+     (define acct1-body (result-body acct1))
+     (check-not-false (string-contains? acct1-body "octocat")
+                      "step 2: should show GitHub username")
+     (check-not-false (string-contains? acct1-body user-id)
+                      "step 2: should show user-id")
+     (check-not-false (string-contains? acct1-body "Unlink GitHub Account")
+                      "step 2: should show unlink button")
+
+     ;; ===== Step 3: Generate an API token =====
+     (define acct1-forms
+       (regexp-match* #rx"action=\"([^\"]+)\"" acct1-body #:match-select cadr))
+     (define token-action (strip-to-path (last acct1-forms)))
+     (define tok-req
+       (make-authenticated-request session-key1 #:method #"POST"
+                                   #:url token-action
+                                   #:bindings (list (binding:form #"token_label" #"gh-token"))
+                                   #:post-data #"token_label=gh-token"))
+     (define tok-result (tester tok-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status tok-result) 200)
+     (define tok-body (result-body tok-result))
+     (define tok-match (regexp-match #rx"(rpkg_[0-9a-f]+)" tok-body))
+     (check-not-false tok-match "step 3: should show token plaintext")
+     (define token-plaintext (cadr tok-match))
+
+     ;; Backend: token valid
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 3: token should validate")
+     (check-equal? (length (list-api-tokens "octocat@example.com")) 1
+                   "step 3: should have 1 token")
+
+     ;; ===== Step 4: Unlink GitHub from account page =====
+     ;; Navigate back to account page first
+     (define continue-match
+       (regexp-match #rx"href=\"([^\"]+)\">Continue to Account Settings" tok-body))
+     (define continue-url (strip-to-path (cadr continue-match)))
+     (define acct2 (tester (make-authenticated-request session-key1 #:url continue-url)
+                           #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct2) 200)
+     (define acct2-body (result-body acct2))
+
+     ;; Find and click unlink
+     (define unlink-match
+       (regexp-match #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Unlink" acct2-body))
+     (check-not-false unlink-match "step 4: should find unlink form")
+     (define unlink-url (strip-to-path (cadr unlink-match)))
+     (define unlink-req
+       (make-authenticated-request session-key1 #:method #"POST"
+                                   #:url unlink-url #:post-data #""))
+     (define unlink-result (tester unlink-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status unlink-result) 200)
+     (check-not-false (string-contains? (result-body unlink-result) "GitHub account unlinked")
+                      "step 4: should confirm unlink")
+
+     ;; Backend: GitHub ID unlinked, but user and token still exist
+     (check-false (lookup-user-by-github-id 55555)
+                  "step 4: GitHub ID should be unlinked")
+     (check-false (github-username-for-email "octocat@example.com")
+                  "step 4: GitHub username should be cleared")
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 4: token should still validate after unlink")
+     (check-equal? (user-id-for-email "octocat@example.com") user-id
+                   "step 4: user-id should be unchanged")
+
+     ;; ===== Step 5: Log out =====
+     (destroy-session! session-key1)
+     (check-false (lookup-session/touch! session-key1)
+                  "step 5: session should be destroyed")
+
+     ;; ===== Step 6: GitHub login again — same email, same GitHub ID =====
+     ;; Since the GitHub ID was unlinked but the email still matches an existing
+     ;; user, this should show the link confirmation page.
+     (define state2 (generate-csrf-state!))
+     (define result6 (tester (make-github-callback-request "code2" state2)
+                             #:raw? #t #:headers? #t))
+     (define body6 (result-body result6))
+     (check-not-false (string-contains? body6 "octocat@example.com")
+                      "step 6: should show email on link page")
+     (check-not-false (string-contains? body6 "octocat")
+                      "step 6: should show GitHub username")
+     (check-not-false (string-contains? body6 "Link Account")
+                      "step 6: should show link button")
+
+     ;; Backend: not re-linked yet
+     (check-false (lookup-user-by-github-id 55555)
+                  "step 6: GitHub ID should not be linked yet")
+
+     ;; ===== Step 7: Submit wrong password on link page =====
+     (define link-forms
+       (regexp-match* #rx"action=\"([^\"]+)\"" body6 #:match-select cadr))
+     (define link-action (strip-to-path (first link-forms)))
+     (define wrong-pw-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"wrong-guess")))
+                #"password=wrong-guess"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define wrong-pw-result (tester wrong-pw-req #:raw? #t #:headers? #t))
+     (define wrong-pw-body (result-body wrong-pw-result))
+     (check-not-false (string-contains? wrong-pw-body "Incorrect password")
+                      "step 7: should show password error")
+     (check-false (lookup-user-by-github-id 55555)
+                  "step 7: GitHub ID still not linked after wrong password")
+
+     ;; ===== Step 8: Set a known password so we can link =====
+     ;; The GitHub-created account has a random password we don't know.
+     ;; Use register-or-update-user! to set a known one.
+     (register-or-update-user! "octocat@example.com" "known-pass")
+
+     ;; Re-submit the link form (from the wrong-password response) with
+     ;; the correct password. The wrong-password response re-renders the
+     ;; link form with a new action URL.
+     (define link-forms2
+       (regexp-match* #rx"action=\"([^\"]+)\"" wrong-pw-body #:match-select cadr))
+     (define link-action2 (strip-to-path (first link-forms2)))
+     (define correct-pw-req
+       (request #"POST"
+                (string->url link-action2)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"known-pass")))
+                #"password=known-pass"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define correct-pw-result (tester correct-pw-req #:raw? #t #:headers? #t))
+     (define correct-pw-headers (result-headers-str correct-pw-result))
+     (check-not-false (string-contains? correct-pw-headers "pltsession=")
+                      "step 8: should set session cookie after linking")
+
+     ;; Backend: GitHub re-linked
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 8: GitHub ID should be re-linked")
+     (check-equal? (github-username-for-email "octocat@example.com") "octocat"
+                   "step 8: GitHub username should be restored")
+
+     ;; ===== Step 9: Second GitHub user logs in — different account =====
+     (set-box! mock-github-id 77777)
+     (set-box! mock-github-username "contributor")
+     (set-box! mock-emails (list "contributor@example.com"))
+
+     (define state3 (generate-csrf-state!))
+     (define result9 (tester (make-github-callback-request "code3" state3)
+                             #:raw? #t #:headers? #t))
+     (check-not-false (string-contains? (result-headers-str result9) "pltsession=")
+                      "step 9: should set session cookie for new user")
+
+     ;; Backend: second user created independently
+     (check-not-false (user-exists?/email "contributor@example.com")
+                      "step 9: second user should exist")
+     (check-equal? (lookup-user-by-github-id 77777) "contributor@example.com"
+                   "step 9: second GitHub ID linked")
+     (check-equal? (github-username-for-email "contributor@example.com") "contributor"
+                   "step 9: second GitHub username stored")
+     (define user-id2 (user-id-for-email "contributor@example.com"))
+     (check-not-false user-id2 "step 9: second user should have user-id")
+     (check-not-equal? user-id user-id2
+                       "step 9: user-ids should be different")
+
+     ;; First user's state is unaffected
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 9: first user's GitHub link should be intact")
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 9: first user's token should still work")
+     (check-equal? (user-id-for-email "octocat@example.com") user-id
+                   "step 9: first user's user-id unchanged")
+
+     ;; ===== Step 10: First user logs in again via GitHub (already linked) =====
+     (set-box! mock-github-id 55555)
+     (set-box! mock-github-username "octocat")
+     (set-box! mock-emails (list "octocat@example.com"))
+
+     (define state4 (generate-csrf-state!))
+     (define result10 (tester (make-github-callback-request "code4" state4)
+                              #:raw? #t #:headers? #t))
+     (check-not-false (string-contains? (result-headers-str result10) "pltsession=")
+                      "step 10: should log in directly via linked GitHub ID")
+
+     ;; Backend: everything still intact
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 10: GitHub link intact")
+     (check-equal? (user-id-for-email "octocat@example.com") user-id
+                   "step 10: user-id unchanged")
+     (check-not-false (login-password-correct? "octocat@example.com" "known-pass")
+                      "step 10: password still works")
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 10: token still works"))))
