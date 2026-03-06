@@ -1098,6 +1098,70 @@
      (check-equal? (github-username-for-email "existing@example.com") "linkme"
                    "GitHub username should be stored after linking"))))
 
+(test-case "github: new user uses primary email, not arbitrary first"
+  ;; github-get-user-info now sorts emails with primary first.
+  ;; The mock bypasses github-get-user-info, so (car verified-emails) is
+  ;; whatever the mock returns first. This test verifies that
+  ;; github-login-complete! uses the first email (the primary after sort).
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     ;; Primary email listed first (as github-get-user-info now does)
+     (values 33333 "multimail"
+             (list "primary@example.com" "secondary@example.com")))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (check-not-false (string-contains? (result-headers-str result) "pltsession=")
+                      "should set session cookie")
+     ;; Account created with primary (first) email
+     (check-not-false (user-exists?/email "primary@example.com")
+                      "account should use primary email")
+     (check-false (user-exists?/email "secondary@example.com")
+                  "secondary email should not be used as account email"))))
+
+(test-case "github: link stores primary github-email"
+  ;; When linking to an existing account, the stored github-email should
+  ;; be the primary GitHub email (first in the list after sorting).
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     ;; Primary email listed first (as github-get-user-info now does);
+     ;; the matching local account is "existing2@example.com" (second)
+     (values 44444 "linker"
+             (list "primary-gh@example.com" "existing2@example.com")))
+   (lambda (db)
+     (register-or-update-user! "existing2@example.com" "my-password")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     ;; Should show link page for existing2@example.com
+     (check-not-false (string-contains? body "existing2@example.com")
+                      "should show existing account email")
+
+     ;; Submit password to link
+     (define form-actions
+       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
+     (define link-action (strip-to-path (first form-actions)))
+     (define link-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"my-password")))
+                #"password=my-password"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (tester link-req #:raw? #t #:headers? #t)
+
+     ;; github-email should be the primary GitHub email (first in list)
+     (define u (lookup-user db "existing2@example.com"))
+     (define stored-gh-email (user-property u 'github-email #f))
+     (check-equal? stored-gh-email "primary-gh@example.com"
+                   "github-email should store primary GitHub email"))))
+
 (test-case "github: link confirmation fails with wrong password"
   (call-with-github-oauth
    (lambda (code redirect-uri) "fake-token")
