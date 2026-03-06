@@ -44,7 +44,10 @@
     (thread (dynamic-require pkg-index/dynamic.rkt 'go)))
 
   ;; start the web front end
-  (make-persistent-state '*config* (lambda () config))
+  ;; Set the config in persistent state. make-persistent-state returns
+  ;; the existing handler if the key already exists (created by config.rkt),
+  ;; so we must call the handler with the config to update the value.
+  ((make-persistent-state '*config* (lambda () config)) config)
   (void (make-reloadable-entry-point 'refresh-packages! (as-module-path packages.rkt)))
   (void (make-reloadable-entry-point 'rerender! (as-module-path site.rkt)))
   (void (make-reloadable-entry-point 'debug-information-dump! (as-module-path debug.rkt)))
