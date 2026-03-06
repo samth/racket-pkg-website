@@ -4,7 +4,8 @@
          create-test-user!
          make-test-request
          with-test-session
-         call-with-test-packages-dir)
+         call-with-test-packages-dir
+         drain-background-tasks!)
 
 (require racket/file
          racket/string
