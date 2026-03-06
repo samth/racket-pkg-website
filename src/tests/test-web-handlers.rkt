@@ -8,16 +8,24 @@
 
 (require rackunit
          racket/string
+         racket/list
          racket/promise
          racket/set
          json
          net/url
          web-server/test
          web-server/http
+         web-server/http/id-cookie
+         web-server/http/cookie
          web-server/http/request-structs
          web-server/http/cookie-parse
+         infrastructure-userdb
          "../site.rkt"
          "../sessions.rkt"
+         "../users.rkt"
+         (submod "../users.rkt" for-testing)
+         "../pkg-index/common.rkt"
+         (submod "../pkg-index/common.rkt" for-testing)
          "test-helpers.rkt")
 
 ;; Helper: extract HTTP status code from raw header bytes
@@ -150,3 +158,108 @@
 (test-case "handler: CORS header on json endpoints"
   (define result (tester "/json/search-completions" #:raw? #t #:headers? #t))
   (check-not-false (string-contains? (result-headers-str result) "Access-Control-Allow-Origin")))
+
+;; --- End-to-end test: account page survives token generation ---
+;; This test catches the bug where user-id-for-email returned a list
+;; instead of a string after a token was generated (due to property
+;; value wrapping in the userdb serialization layer). The account page
+;; would crash with an xexpr contract violation on the second render.
+
+;; Helper: make a request struct with a signed session cookie
+(define (make-authenticated-request session-key
+                                    #:method [method #"GET"]
+                                    #:url [url-string "/"]
+                                    #:bindings [bindings '()]
+                                    #:post-data [post-data #f])
+  (define id-cookie (make-id-cookie "pltsession" #:key (session-signing-key) session-key))
+  (define set-cookie-str (bytes->string/utf-8 (header-value (cookie->header id-cookie))))
+  (define cookie-val (cadr (regexp-match #rx"pltsession=([^;]+)" set-cookie-str)))
+  (define cookie-header
+    (header #"Cookie"
+            (string->bytes/utf-8
+             (format "pltsession=~a" cookie-val))))
+  (request method
+           (string->url url-string)
+           (list cookie-header)
+           (delay bindings)
+           post-data
+           "127.0.0.1" 80 "127.0.0.1"))
+
+;; Extract the path portion from a URL, stripping scheme and host.
+;; Continuation URLs from send/suspend/dispatch/dynamic have dynamic-urlprefix
+;; prepended (e.g. "https://localhost:7443/account;(...)").
+(define (strip-to-path url-str)
+  (define u (string->url url-str))
+  (url->string (struct-copy url u [scheme #f] [host #f] [port #f] [user #f])))
+
+(test-case "e2e: account page renders after token generation"
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
+        (initialize-users-for-testing! db (make-registration-state))
+        (set-userdb-for-testing! db)
+
+        ;; Create user and session
+        (register-or-update-user! "e2e@example.com" "testpass")
+        (ensure-user-id! "e2e@example.com")
+        (define session-key
+          (create-session! "e2e@example.com"))
+
+        ;; Step 1: GET /account — should render with user-id
+        (define req1 (make-authenticated-request session-key #:url "/account"))
+        (define result1 (tester req1 #:raw? #t #:headers? #t))
+        (check-equal? (result-status result1) 200
+                      "account page should return 200")
+        (define body1 (result-body result1))
+        (check-not-false (string-contains? body1 "User ID")
+                         "account page should show User ID")
+        (check-not-false (string-contains? body1 "Generate Token")
+                         "account page should show token generation form")
+
+        ;; Step 2: Extract the token generation form action URL
+        ;; The token gen form contains "Generate Token" button — find the action
+        ;; for the form that has class "form-inline" (the token generation form)
+        (define form-actions
+          (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
+        (check-not-false (pair? form-actions)
+                         "should find at least one form action")
+        ;; The token generation form is the last one (after password change forms)
+        (define token-form-action (strip-to-path (last form-actions)))
+
+        ;; Step 3: POST to generate a token
+        (define req2
+          (make-authenticated-request session-key
+                                     #:method #"POST"
+                                     #:url token-form-action
+                                     #:bindings (list (binding:form #"token_label" #"test-ci"))
+                                     #:post-data #"token_label=test-ci"))
+        (define result2 (tester req2 #:raw? #t #:headers? #t))
+        (check-equal? (result-status result2) 200
+                      "token generation should return 200")
+        (define body2 (result-body result2))
+        (check-not-false (string-contains? body2 "rpkg_")
+                         "should show the generated token")
+        (check-not-false (string-contains? body2 "Continue to Account Settings")
+                         "should show continue link")
+
+        ;; Step 4: Extract the "Continue to Account Settings" link
+        ;; The link is: <a href="...">Continue to Account Settings</a>
+        (define continue-match
+          (regexp-match #rx"href=\"([^\"]+)\">Continue to Account Settings" body2))
+        (check-not-false continue-match
+                         "should find continue link URL")
+        (define continue-url (strip-to-path (cadr continue-match)))
+
+        ;; Step 5: GET the continue link — renders account page again
+        ;; This is where the bug would crash: user-id-for-email returns
+        ;; a list instead of a string after the token save/load cycle
+        (define req3 (make-authenticated-request session-key #:url continue-url))
+        (define result3 (tester req3 #:raw? #t #:headers? #t))
+        (check-equal? (result-status result3) 200
+                      "account page after token generation should return 200")
+        (define body3 (result-body result3))
+        (check-not-false (string-contains? body3 "User ID")
+                         "account page should still show User ID after token generation")
+        (check-not-false (string-contains? body3 "test-ci")
+                         "account page should show the new token in the list"))))))
