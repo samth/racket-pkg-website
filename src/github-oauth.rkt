@@ -13,6 +13,7 @@
 
 (require net/http-easy
          net/uri-codec
+         racket/list
          racket/random
          file/sha1
          "config.rkt"
@@ -133,8 +134,14 @@
          "GitHub API: unexpected /user/emails response shape")
         (values #f #f #f)]
        [else
+        ;; Sort verified emails with primary first so (car verified-emails)
+        ;; gives the user's primary email, not an arbitrary one.
         (define verified-emails
-          (for/list ([e (in-list emails-data)]
+          (for/list ([e (in-list (sort emails-data
+                                       (lambda (a b)
+                                         (and (hash? a) (hash? b)
+                                              (hash-ref a 'primary #f)
+                                              (not (hash-ref b 'primary #f))))))]
                      #:when (and (hash? e) (hash-ref e 'verified #f)))
             (hash-ref e 'email)))
         (values github-id github-username verified-emails)])]))
