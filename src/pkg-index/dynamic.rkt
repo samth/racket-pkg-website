@@ -253,5 +253,13 @@
                  #:port port
                  #:log-file (current-output-port)))
 
+(module+ for-testing
+  (provide hash-deep-merge
+           request->bearer-token
+           ensure-authenticate
+           response/json
+           wrap-with-cors-handler
+           *cors-headers*))
+
 (module+ main
   (go))

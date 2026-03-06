@@ -40,10 +40,10 @@
     ("rpc.rkt"             . 80)
     ;; Feature modules (harder to test in-process)
     ("packages.rkt"        . 40)
-    ("github-oauth.rkt"    . 30)
-    ("site.rkt"            . 25)
+    ("github-oauth.rkt"    . 35)
+    ("site.rkt"            . 28)
     ;; Backend modules
-    ("pkg-index/dynamic.rkt" . 10)
+    ("pkg-index/dynamic.rkt" . 25)
     ;; Side-effectful, requires external services
     ("send-email.rkt"      . 0)))
 

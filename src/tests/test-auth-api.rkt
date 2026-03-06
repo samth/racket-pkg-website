@@ -2,10 +2,17 @@
 
 (require rackunit
          racket/file
+         racket/promise
+         json
+         net/base64
+         net/url
          infrastructure-userdb
+         web-server/http
+         web-server/http/request-structs
          "../pkg-index/common.rkt"
          (submod "../pkg-index/common.rkt" for-testing)
          "../pkg-index/api.rkt"
+         (submod "../pkg-index/dynamic.rkt" for-testing)
          "../users.rkt"
          (submod "../users.rkt" for-testing)
          "test-helpers.rkt")
@@ -426,3 +433,126 @@
                         (sleep 1)
                         (check-true (file-exists? notice-path)
                                     "notice file should exist after package save"))))
+
+;; --- dynamic.rkt utility tests ---
+
+(test-case "hash-deep-merge: flat merge"
+  (check-equal? (hash-deep-merge (hasheq 'a 1 'b 2) (hasheq 'b 3 'c 4))
+                (hasheq 'a 1 'b 3 'c 4)))
+
+(test-case "hash-deep-merge: nested merge"
+  (define h1 (hasheq 'meta (hasheq 'x 1 'y 2)))
+  (define h2 (hasheq 'meta (hasheq 'y 99 'z 3)))
+  (define merged (hash-deep-merge h1 h2))
+  (check-equal? (hash-ref (hash-ref merged 'meta) 'x) 1)
+  (check-equal? (hash-ref (hash-ref merged 'meta) 'y) 99)
+  (check-equal? (hash-ref (hash-ref merged 'meta) 'z) 3))
+
+(test-case "hash-deep-merge: new key with hash value"
+  (define h1 (hasheq 'a 1))
+  (define h2 (hasheq 'b (hasheq 'nested 42)))
+  (define merged (hash-deep-merge h1 h2))
+  (check-equal? (hash-ref (hash-ref merged 'b) 'nested) 42))
+
+(test-case "hash-deep-merge: empty hashes"
+  (check-equal? (hash-deep-merge (hasheq) (hasheq 'a 1)) (hasheq 'a 1))
+  (check-equal? (hash-deep-merge (hasheq 'a 1) (hasheq)) (hasheq 'a 1)))
+
+;; Helper: construct a request struct for dynamic.rkt tests
+(define (make-test-request #:method [method #"GET"]
+                           #:headers [headers '()]
+                           #:post-data [post-data #f])
+  (request method
+           (string->url "http://localhost/test")
+           headers
+           (delay '())
+           post-data
+           "127.0.0.1"
+           0
+           "127.0.0.1"))
+
+(test-case "request->bearer-token: extracts token from Authorization header"
+  (define req (make-test-request
+               #:headers (list (header #"Authorization" #"Bearer rpkg_test123"))))
+  (check-equal? (request->bearer-token req) "rpkg_test123"))
+
+(test-case "request->bearer-token: returns #f without header"
+  (define req (make-test-request))
+  (check-false (request->bearer-token req)))
+
+(test-case "request->bearer-token: returns #f for non-Bearer auth"
+  (define req (make-test-request
+               #:headers (list (header #"Authorization" #"Basic dXNlcjpwYXNz"))))
+  (check-false (request->bearer-token req)))
+
+(test-case "ensure-authenticate: Bearer token auth"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "bearer@example.com" "pass")
+     (define token (generate-api-token! "bearer@example.com" "test-label"))
+     (define req (make-test-request
+                  #:headers (list (header #"Authorization"
+                                         (string->bytes/utf-8
+                                          (format "Bearer ~a" token))))))
+     (define result
+       (ensure-authenticate req (lambda () (list 'ok (current-user)))))
+     (check-equal? result (list 'ok "bearer@example.com")))))
+
+(test-case "ensure-authenticate: Basic auth"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (register-or-update-user! "basic@example.com" "mypass")
+     (define creds (string->bytes/utf-8
+                    (bytes->string/utf-8
+                     (base64-encode (string->bytes/utf-8 "basic@example.com:mypass")
+                                    #""))))
+     (define req (make-test-request
+                  #:headers (list (header #"Authorization"
+                                         (bytes-append #"Basic " creds)))))
+     (define result
+       (ensure-authenticate req (lambda () (list 'ok (current-user)))))
+     (check-equal? result (list 'ok "basic@example.com")))))
+
+(test-case "ensure-authenticate: no auth returns error"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (define req (make-test-request))
+     (define result (ensure-authenticate req (lambda () 'should-not-reach)))
+     (check-equal? result "authentication-required"))))
+
+(test-case "ensure-authenticate: invalid token returns error"
+  (call-with-test-env
+   (lambda (db pkgs-dir)
+     (define req (make-test-request
+                  #:headers (list (header #"Authorization" #"Bearer rpkg_invalid"))))
+     (define result (ensure-authenticate req (lambda () 'should-not-reach)))
+     (check-equal? result "authentication-required"))))
+
+(test-case "response/json: returns well-formed JSON response"
+  (define resp (response/json (hasheq 'ok #t 'count 42)))
+  (check-equal? (response-code resp) 200)
+  (check-equal? (response-mime resp) #"application/json")
+  ;; Verify CORS headers present
+  (define resp-headers (response-headers resp))
+  (check-not-false
+   (for/or ([h (in-list resp-headers)])
+     (equal? (header-field h) #"Access-Control-Allow-Origin"))))
+
+(test-case "wrap-with-cors-handler: passes through non-OPTIONS requests"
+  (define inner-called? (box #f))
+  (define wrapped
+    (wrap-with-cors-handler
+     (lambda (req) (set-box! inner-called? #t) (response/json 'ok))))
+  (define req (make-test-request #:method #"GET"))
+  (wrapped req)
+  (check-true (unbox inner-called?)))
+
+(test-case "wrap-with-cors-handler: handles OPTIONS directly"
+  (define inner-called? (box #f))
+  (define wrapped
+    (wrap-with-cors-handler
+     (lambda (req) (set-box! inner-called? #t) (response/json 'ok))))
+  (define req (make-test-request #:method #"OPTIONS"))
+  (define resp (wrapped req))
+  (check-false (unbox inner-called?))
+  (check-equal? (response-code resp) 200))
