@@ -25,6 +25,8 @@ jobs:
         run: make keys
 
       - name: Run tests
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
         run: raco test -y src/tests/
 
   coverage:
