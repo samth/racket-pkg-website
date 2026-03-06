@@ -14,7 +14,10 @@
          web-server/http/request-structs
          "../sessions.rkt"
          "../pkg-index/common.rkt"
-         (submod "../pkg-index/common.rkt" for-testing))
+         (submod "../pkg-index/common.rkt" for-testing)
+         (submod "../pkg-index/update.rkt" for-testing)
+         (submod "../pkg-index/static.rkt" for-testing)
+         (submod "../pkg-index/s3.rkt" for-testing))
 
 ;; Run thunk with a temporary userdb directory.
 ;; The thunk receives the userdb as its argument.
@@ -56,13 +59,20 @@
            80
            "127.0.0.1"))
 
-
 ;; Run thunk with a test session set up for the given email.
 (define (with-test-session email thunk #:curator? [curator? #f] #:superuser? [superuser? #f])
   (define key (create-session! email #:curator? curator? #:superuser? superuser?))
   (define s (lookup-session/touch! key))
   (parameterize ([current-session s])
     (thunk)))
+
+;; Wait for all background tasks (update, static, s3) to finish.
+;; Each task uses a semaphore with initial value 1; acquiring it
+;; ensures no task is currently running.
+(define (drain-background-tasks!)
+  (for ([sema (list update-run-sema static-run-sema s3-run-sema)])
+    (semaphore-wait sema)
+    (semaphore-post sema)))
 
 ;; Run thunk with a temporary packages directory and related state
 ;; (notice-path, static-path, cache-path) initialized for testing.
@@ -71,10 +81,9 @@
   (define tmp-static (make-temporary-directory))
   (dynamic-wind void
                 (lambda ()
-                  (initialize-for-testing! #:pkgs-path tmp
-                                           #:userdb #f
-                                           #:static-path tmp-static)
+                  (initialize-for-testing! #:pkgs-path tmp #:userdb #f #:static-path tmp-static)
                   (thunk tmp))
                 (lambda ()
+                  (drain-background-tasks!)
                   (delete-directory/files tmp)
                   (delete-directory/files tmp-static))))

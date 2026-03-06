@@ -220,6 +220,9 @@
          signal-update!
          signal-update!/beat)
 
+(module+ for-testing
+  (provide (rename-out [run-sema update-run-sema])))
+
 (module+ main
   (require racket/cmdline)
   (command-line

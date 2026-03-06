@@ -59,6 +59,9 @@
 (provide upload-pkgs
          signal-s3!)
 
+(module+ for-testing
+  (provide (rename-out [run-sema s3-run-sema])))
+
 (module+ main
   (require racket/cmdline)
   (command-line
