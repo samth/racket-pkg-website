@@ -12,3 +12,5 @@ pkgs-all.json.gz
 var/
 .racket
 .raco
+*_pat.txt
+client_*.txt
