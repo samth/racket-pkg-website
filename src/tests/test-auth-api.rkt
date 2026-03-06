@@ -318,6 +318,8 @@
                                          #:tags #f
                                          #:authors '("author@example.com")
                                          #:versions #f)
+                          ;; Wait for background update from creation before renaming
+                          (drain-background-tasks!)
                           (define result
                             (save-package! #:old-name "old-name-pkg"
                                            #:new-name "new-name-pkg"
