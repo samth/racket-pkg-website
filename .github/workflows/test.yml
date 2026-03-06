@@ -19,7 +19,7 @@ jobs:
           version: '9.1'
           dest: '/opt/racket'
           sudo: never
-          packages: 'https://github.com/racket/infrastructure-userdb.git#main, reloadable, aws, s3-sync, plt-service-monitor, http-easy'
+          packages: 'https://github.com/samth/infrastructure-userdb.git#main, reloadable, aws, s3-sync, plt-service-monitor, http-easy'
 
       - name: Generate SSL keys
         run: make keys
@@ -38,7 +38,7 @@ jobs:
           version: '9.1'
           dest: '/opt/racket'
           sudo: never
-          packages: 'https://github.com/racket/infrastructure-userdb.git#main, reloadable, aws, s3-sync, plt-service-monitor, http-easy, cover'
+          packages: 'https://github.com/samth/infrastructure-userdb.git#main, reloadable, aws, s3-sync, plt-service-monitor, http-easy, cover'
 
       - name: Generate SSL keys
         run: make keys
