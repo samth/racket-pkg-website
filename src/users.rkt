@@ -13,6 +13,7 @@
          create-github-user!
          github-username-for-email
          user-exists?/email
+         has-password?
          initialize-users!)
 
 (module+ for-testing
@@ -104,8 +105,15 @@
   (ensure-initialized!)
   (log-racket-pkg-website/users-info "Updating user record ~v" email)
   (save-user! userdb
-              (user-password-set (or (lookup-user userdb email) (make-user email password))
-                                 password)))
+              (user-property-set
+               (user-password-set (or (lookup-user userdb email) (make-user email password))
+                                  password)
+               'has-password #t)))
+
+(define (has-password? email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email (lambda _ #f)))
+  (and u (user-property u 'has-password #f) #t))
 
 (define (generate-user-id)
   (define bs (crypto-random-bytes 16))

@@ -436,50 +436,70 @@
                            ,@(if gh-username
                                  `((p "Linked to GitHub account: "
                                       (strong ,gh-username))
-                                   (form ((method "post")
-                                          (action ,(embed-url process-github-unlink)))
-                                         (button ((type "submit")
-                                                  (class "btn btn-danger btn-sm"))
-                                                 "Unlink GitHub Account")))
+                                   ,@(if (has-password? email)
+                                         `((form ((method "post")
+                                                  (action ,(embed-url process-github-unlink)))
+                                                 (button ((type "submit")
+                                                          (class "btn btn-danger btn-sm"))
+                                                         "Unlink GitHub Account")))
+                                         `((p ((class "text-muted"))
+                                              "To unlink your GitHub account, "
+                                              "you must first set a password below."))))
                                  `((p "No GitHub account linked.")
                                    (a ((href ,(named-url github-login-start))
                                        (class "btn btn-default"))
                                       "Link GitHub Account"))))))
                '())
-         (div ((class "panel panel-default"))
-              (div ((class "panel-heading")) (h3 ((class "panel-title")) "Change Password"))
+         ,(let ([user-has-password (has-password? email)])
+            `(div ((class "panel panel-default"))
+              (div ((class "panel-heading"))
+                   (h3 ((class "panel-title"))
+                       ,(if user-has-password "Change Password" "Set Password")))
               (div ((class "panel-body"))
                    (form ((class "form-horizontal")
                           (method "post")
                           (action ,(embed-url process-password-change))
                           (role "form"))
-                         ,(form-group 2 3 (label "current_password" "Current password")
-                                      0 5 (password-input "current_password"))
-                         ,(form-group 2 3 (label "new_password" "New password")
+                         ,@(if user-has-password
+                               `(,(form-group 2 3 (label "current_password" "Current password")
+                                              0 5 (password-input "current_password")))
+                               '())
+                         ,(form-group 2 3 (label "new_password"
+                                                 (if user-has-password "New password" "Password"))
                                       0 5 (password-input "new_password"))
-                         ,(form-group 2 3 (label "confirm_password" "Confirm new password")
+                         ,(form-group 2 3 (label "confirm_password" "Confirm password")
                                       0 5 (password-input "confirm_password"))
-                         ,(form-group 5 5 (primary-button "Change Password")))))))))))
+                         ,(form-group 5 5 (primary-button
+                                           (if user-has-password
+                                               "Change Password"
+                                               "Set Password")))))))))))))
 
 (define (process-password-change request)
   (define-form-bindings/trim request (current_password new_password confirm_password))
   (define email (current-email))
+  (define user-has-password (has-password? email))
   (cond
-    [(equal? current_password "")
+    [(and user-has-password (equal? current_password ""))
      (account-form "Please enter your current password." "alert-danger")]
     [(equal? new_password "")
      (account-form "Please enter a new password." "alert-danger")]
     [(not (equal? new_password confirm_password))
      (account-form "New passwords do not match." "alert-danger")]
-    [(not (login-password-correct? email current_password))
+    [(and user-has-password (not (login-password-correct? email current_password)))
      (account-form "Current password is incorrect." "alert-danger")]
     [else
      (register-or-update-user! email new_password)
-     (account-form "Password changed successfully.")]))
+     (account-form (if user-has-password
+                       "Password changed successfully."
+                       "Password set successfully."))]))
 
 (define (process-github-unlink request)
-  (unlink-github-account! (current-email))
-  (account-form "GitHub account unlinked."))
+  (define email (current-email))
+  (if (has-password? email)
+      (begin (unlink-github-account! email)
+             (account-form "GitHub account unlinked."))
+      (account-form "You must set a password before unlinking your GitHub account."
+                    "alert-danger")))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
