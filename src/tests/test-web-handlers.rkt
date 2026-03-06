@@ -13,6 +13,7 @@
          racket/set
          json
          net/url
+         reloadable
          web-server/test
          web-server/http
          web-server/http/id-cookie
@@ -24,6 +25,8 @@
          "../sessions.rkt"
          "../users.rkt"
          (submod "../users.rkt" for-testing)
+         "../github-oauth.rkt"
+         (submod "../github-oauth.rkt" for-testing)
          "../pkg-index/common.rkt"
          (submod "../pkg-index/common.rkt" for-testing)
          "../pkg-index/api.rkt"
@@ -923,3 +926,323 @@
         ;; Should show remaining token(s)
         (check-false (string-contains? acct-final-body "No API tokens")
                      "step 13: should still have tokens after re-login"))))))
+
+;; --- GitHub OAuth integration tests ---
+
+;; Access the persistent config handler so we can set test config values
+(define config-handler (make-persistent-state '*config* (lambda () (hash))))
+
+;; Save the original config to restore after each test
+(define original-config (config-handler))
+
+;; Helper: run thunk with GitHub OAuth configured and mock exchange/user-info functions.
+;; fake-exchange: code redirect-uri -> access-token-or-#f
+;; fake-user-info: access-token -> (values github-id github-username verified-emails)
+(define (call-with-github-oauth fake-exchange fake-user-info thunk)
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
+        (initialize-users-for-testing! db (make-registration-state))
+        (set-userdb-for-testing! db)
+        ;; Enable GitHub OAuth in config
+        (config-handler (hash-set* original-config
+                                    'github-login-client-id "test-client-id"
+                                    'github-login-client-secret "test-client-secret"))
+        (dynamic-wind
+          void
+          (lambda ()
+            (parameterize ([current-github-exchange-code fake-exchange]
+                           [current-github-get-user-info fake-user-info])
+              (thunk db)))
+          (lambda ()
+            (config-handler original-config))))))))
+
+;; Helper: build a GitHub callback request with code and state params
+(define (make-github-callback-request code state)
+  (define qs (if state
+                 (format "code=~a&state=~a" code state)
+                 (format "code=~a" code)))
+  (request #"GET"
+           (string->url (string-append "/auth/github/callback?" qs))
+           '()
+           (delay (list (binding:form (string->bytes/utf-8 "code")
+                                      (string->bytes/utf-8 code))
+                        (binding:form (string->bytes/utf-8 "state")
+                                      (string->bytes/utf-8 (or state "")))))
+           #f
+           "127.0.0.1" 80 "127.0.0.1"))
+
+(test-case "github: new user — creates account and session"
+  (call-with-github-oauth
+   ;; Mock exchange: always return a token
+   (lambda (code redirect-uri) "fake-access-token")
+   ;; Mock user-info: return a new GitHub user
+   (lambda (token)
+     (values 12345 "ghuser" (list "ghuser@example.com")))
+   (lambda (db)
+     ;; Verify: user does not exist yet
+     (check-false (user-exists?/email "ghuser@example.com")
+                  "user should not exist before GitHub login")
+
+     ;; Generate a valid CSRF state
+     (define state (generate-csrf-state!))
+
+     ;; Hit the callback
+     (define result (tester (make-github-callback-request "test-code" state)
+                            #:raw? #t #:headers? #t))
+     (define headers (result-headers-str result))
+
+     ;; Should set a session cookie (successful login)
+     (check-not-false (string-contains? headers "pltsession=")
+                      "should set session cookie for new GitHub user")
+
+     ;; Verify backend: user was created
+     (check-not-false (user-exists?/email "ghuser@example.com")
+                      "user should exist after GitHub login")
+
+     ;; Verify backend: GitHub ID linked
+     (check-equal? (lookup-user-by-github-id 12345) "ghuser@example.com"
+                   "GitHub ID should map to the new user")
+
+     ;; Verify backend: GitHub username stored
+     (check-equal? (github-username-for-email "ghuser@example.com") "ghuser"
+                   "GitHub username should be stored")
+
+     ;; Verify backend: user-id was assigned
+     (check-not-false (user-id-for-email "ghuser@example.com")
+                      "user-id should be assigned on login"))))
+
+(test-case "github: known user — logs in directly"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     (values 67890 "returning-user" (list "returning@example.com")))
+   (lambda (db)
+     ;; Pre-create the user with GitHub ID already linked
+     (register-or-update-user! "returning@example.com" "some-pass")
+     (ensure-user-id! "returning@example.com")
+     (link-github-account! "returning@example.com" 67890 "returning-user"
+                           "returning@example.com")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define headers (result-headers-str result))
+
+     ;; Should set session cookie
+     (check-not-false (string-contains? headers "pltsession=")
+                      "should set session cookie for returning user")
+
+     ;; Backend: user-id unchanged
+     (check-not-false (user-id-for-email "returning@example.com")
+                      "user-id should still exist"))))
+
+(test-case "github: email matches existing account — shows link confirmation"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     (values 11111 "linkme" (list "existing@example.com")))
+   (lambda (db)
+     ;; Pre-create an email+password user (no GitHub linked)
+     (register-or-update-user! "existing@example.com" "my-password")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     ;; Should show the "link account" confirmation page
+     (check-not-false (string-contains? body "existing@example.com")
+                      "should mention the existing email")
+     (check-not-false (string-contains? body "linkme")
+                      "should show the GitHub username")
+     (check-not-false (string-contains? body "Link Account")
+                      "should show the link button")
+
+     ;; Backend: GitHub ID should NOT be linked yet (waiting for password)
+     (check-false (lookup-user-by-github-id 11111)
+                  "GitHub ID should not be linked before password confirmation")
+
+     ;; Step 2: Submit password to complete the link
+     (define form-actions
+       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
+     (check-not-false (pair? form-actions) "should find link form action")
+     (define link-action (strip-to-path (first form-actions)))
+
+     (define link-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"my-password")))
+                #"password=my-password"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define link-result (tester link-req #:raw? #t #:headers? #t))
+     (define link-headers (result-headers-str link-result))
+
+     ;; Should set session cookie (login succeeds after linking)
+     (check-not-false (string-contains? link-headers "pltsession=")
+                      "should set session cookie after linking")
+
+     ;; Backend: GitHub ID now linked
+     (check-equal? (lookup-user-by-github-id 11111) "existing@example.com"
+                   "GitHub ID should be linked after password confirmation")
+     (check-equal? (github-username-for-email "existing@example.com") "linkme"
+                   "GitHub username should be stored after linking"))))
+
+(test-case "github: link confirmation fails with wrong password"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     (values 22222 "badpass-user" (list "wrongpw@example.com")))
+   (lambda (db)
+     (register-or-update-user! "wrongpw@example.com" "correct-password")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     ;; Find the link form and submit with wrong password
+     (define form-actions
+       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
+     (define link-action (strip-to-path (first form-actions)))
+
+     (define link-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"wrong-password")))
+                #"password=wrong-password"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define link-result (tester link-req #:raw? #t #:headers? #t))
+     (define link-body (result-body link-result))
+
+     ;; Should show error, NOT set session cookie
+     (check-not-false (string-contains? link-body "Incorrect password")
+                      "should show incorrect password error")
+     (check-false (string-contains? (result-headers-str link-result) "pltsession=")
+                  "should not set session cookie on wrong password")
+
+     ;; Backend: GitHub ID NOT linked
+     (check-false (lookup-user-by-github-id 22222)
+                  "GitHub ID should not be linked after wrong password"))))
+
+(test-case "github: invalid CSRF state rejected"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token) (values 99999 "csrf-user" (list "csrf@example.com")))
+   (lambda (db)
+     ;; Use a bogus state that was never generated
+     (define result (tester (make-github-callback-request "code" "bogus-state")
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     (check-not-false (string-contains? body "Invalid or expired")
+                      "should show CSRF error")
+
+     ;; Backend: no user created
+     (check-false (user-exists?/email "csrf@example.com")
+                  "no user should be created with invalid CSRF state"))))
+
+(test-case "github: exchange failure shows error"
+  (call-with-github-oauth
+   ;; Mock exchange: returns #f (failure)
+   (lambda (code redirect-uri) #f)
+   (lambda (token) (values #f #f #f))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+
+     (check-not-false (string-contains? (result-body result) "GitHub login failed")
+                      "should show exchange failure error"))))
+
+(test-case "github: no verified emails shows error"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   ;; Mock user-info: valid user but no verified emails
+   (lambda (token) (values 33333 "noemail" '()))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+
+     (check-not-false (string-contains? (result-body result) "No verified email")
+                      "should show no verified email error")
+
+     ;; Backend: no user created
+     (check-false (user-exists?/email "noemail@example.com")
+                  "no user should be created without verified email"))))
+
+(test-case "github: user-info failure shows error"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   ;; Mock user-info: returns failure
+   (lambda (token) (values #f #f #f))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+
+     (check-not-false (string-contains? (result-body result)
+                                        "Could not retrieve your GitHub account")
+                      "should show user-info failure error"))))
+
+(test-case "github: unlink from account page"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token) (values 44444 "unlinkme" (list "unlink@example.com")))
+   (lambda (db)
+     ;; Create user with GitHub linked
+     (register-or-update-user! "unlink@example.com" "pass")
+     (ensure-user-id! "unlink@example.com")
+     (link-github-account! "unlink@example.com" 44444 "unlinkme" "unlink@example.com")
+
+     ;; Verify linked
+     (check-equal? (lookup-user-by-github-id 44444) "unlink@example.com")
+     (check-equal? (github-username-for-email "unlink@example.com") "unlinkme")
+
+     ;; Log in and visit account page
+     (define session-key (create-session! "unlink@example.com"))
+     (define acct-result
+       (tester (make-authenticated-request session-key #:url "/account")
+               #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct-result) 200)
+     (define acct-body (result-body acct-result))
+
+     ;; Should show linked GitHub account and unlink button
+     (check-not-false (string-contains? acct-body "unlinkme")
+                      "should show linked GitHub username")
+     (check-not-false (string-contains? acct-body "Unlink GitHub Account")
+                      "should show unlink button")
+
+     ;; Find and click the unlink form
+     (define unlink-match
+       (regexp-match #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Unlink" acct-body))
+     (check-not-false unlink-match "should find unlink form")
+     (define unlink-url (strip-to-path (cadr unlink-match)))
+
+     (define unlink-req
+       (make-authenticated-request session-key #:method #"POST"
+                                   #:url unlink-url #:post-data #""))
+     (define unlink-result (tester unlink-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status unlink-result) 200)
+     (check-not-false (string-contains? (result-body unlink-result) "GitHub account unlinked")
+                      "should show unlink confirmation")
+
+     ;; Backend: GitHub ID no longer linked
+     (check-false (lookup-user-by-github-id 44444)
+                  "GitHub ID should not be linked after unlinking")
+     (check-false (github-username-for-email "unlink@example.com")
+                  "GitHub username should be cleared after unlinking"))))
+
+(test-case "github: login page shows GitHub button when configured"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) #f)
+   (lambda (token) (values #f #f #f))
+   (lambda (db)
+     (define result (tester "/login" #:raw? #t #:headers? #t))
+     (check-equal? (result-status result) 200)
+     (check-not-false (string-contains? (result-body result) "Sign in with GitHub")
+                      "login page should show GitHub sign-in button when configured"))))

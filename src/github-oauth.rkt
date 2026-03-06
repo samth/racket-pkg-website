@@ -7,7 +7,9 @@
          github-exchange-code
          github-get-user-info
          github-oauth-configured?
-         validate-csrf-state!)
+         validate-csrf-state!
+         current-github-exchange-code
+         current-github-get-user-info)
 
 (require net/http-easy
          net/uri-codec
@@ -136,6 +138,10 @@
                      #:when (and (hash? e) (hash-ref e 'verified #f)))
             (hash-ref e 'email)))
         (values github-id github-username verified-emails)])]))
+
+;; Indirection for testing: allows tests to replace GitHub API calls
+(define current-github-exchange-code (make-parameter github-exchange-code))
+(define current-github-get-user-info (make-parameter github-get-user-info))
 
 (module+ for-testing
   (provide generate-csrf-state!
