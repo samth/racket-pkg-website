@@ -3,6 +3,7 @@
 (require rackunit
          racket/string
          racket/file
+         racket/port
          racket/runtime-path
          racket/tcp
          json
@@ -22,8 +23,10 @@
 ;; Read PAT from environment variable or local file (never committed).
 ;; Tests that need a real token skip when neither is available or the token is invalid.
 (define-runtime-path pat-file "../../samth_pat.txt")
+(define (non-empty-string s) (and s (not (string=? s "")) s))
 (define github-pat-raw
-  (or (getenv "GITHUB_PAT") (and (file-exists? pat-file) (string-trim (file->string pat-file)))))
+  (or (non-empty-string (getenv "GITHUB_PAT"))
+      (and (file-exists? pat-file) (non-empty-string (string-trim (file->string pat-file))))))
 ;; Validate the token actually works before using it for tests
 (define github-pat
   (and github-pat-raw
@@ -121,12 +124,13 @@
   (define base (format "http://127.0.0.1:~a" port))
   (define server-thread
     (thread (lambda ()
-              (serve/servlet mock-github-handler
-                             #:port port
-                             #:listen-ip "127.0.0.1"
-                             #:servlet-regexp #rx""
-                             #:servlet-path "/"
-                             #:launch-browser? #f))))
+              (parameterize ([current-output-port (open-output-nowhere)])
+                (serve/servlet mock-github-handler
+                               #:port port
+                               #:listen-ip "127.0.0.1"
+                               #:servlet-regexp #rx""
+                               #:servlet-path "/"
+                               #:launch-browser? #f)))))
   (sleep 1)
   (dynamic-wind void
                 (lambda ()
