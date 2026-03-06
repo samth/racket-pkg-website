@@ -478,6 +478,9 @@
 (provide do-static
          signal-static!)
 
+(module+ for-testing
+  (provide (rename-out [run-sema static-run-sema])))
+
 (module+ main
   (require racket/cmdline)
 
