@@ -21,7 +21,13 @@ clean:
 test:
 	raco test -y src/tests/
 
-.PHONY: run bounce test
+seed:
+	racket scripts/seed-local-dev.rkt
+
+run-local: seed
+	CONFIG=local-dev PKG_SERVER_HTTP=1 ./run
+
+.PHONY: run bounce test seed run-local
 
 ###########################################################################
 
