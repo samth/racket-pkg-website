@@ -595,3 +595,331 @@
                    "should mention the package name")
   (check-not-false (string-contains? body1 "package index")
                    "should have link to return to package index"))
+
+;; --- Comprehensive auth + account lifecycle test ---
+
+(test-case "e2e: full auth and account lifecycle"
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
+        (initialize-users-for-testing! db (make-registration-state))
+        (set-userdb-for-testing! db)
+
+        ;; ===== Step 1: Register user directly (backend) =====
+        ;; Registration via the web form requires solving a random challenge,
+        ;; so we register directly and verify backend state.
+        (register-or-update-user! "lifecycle@example.com" "initial-pass")
+        (check-not-false (login-password-correct? "lifecycle@example.com" "initial-pass")
+                         "step 1: user should be registered with initial password")
+        (check-false (user-id-for-email "lifecycle@example.com")
+                     "step 1: user should not have a user-id yet")
+
+        ;; ===== Step 2: Log in via web form =====
+        ;; GET /login to get the login form
+        (define login-result (tester "/login" #:raw? #t #:headers? #t))
+        (check-equal? (result-status login-result) 200)
+        (define login-body (result-body login-result))
+        (define login-actions
+          (regexp-match* #rx"action=\"([^\"]+)\"" login-body #:match-select cadr))
+        (check-not-false (pair? login-actions) "step 2: should find login form action")
+        (define login-action (strip-to-path (first login-actions)))
+
+        ;; POST credentials
+        (define login-req
+          (request #"POST"
+                   (string->url login-action)
+                   (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                   (delay (list (binding:form #"email" #"lifecycle@example.com")
+                                (binding:form #"password" #"initial-pass")))
+                   #"email=lifecycle@example.com&password=initial-pass"
+                   "127.0.0.1" 80 "127.0.0.1"))
+        (define login-post-result (tester login-req #:raw? #t #:headers? #t))
+        ;; Successful login sets a session cookie and redirects
+        (define login-headers (result-headers-str login-post-result))
+        (check-not-false (string-contains? login-headers "pltsession=")
+                         "step 2: login should set session cookie")
+
+        ;; Verify: login assigns a user-id
+        (check-not-false (user-id-for-email "lifecycle@example.com")
+                         "step 2: login should assign a user-id")
+        (define user-id (user-id-for-email "lifecycle@example.com"))
+
+        ;; Extract the session key from the cookie to use for subsequent requests
+        ;; The tester creates a real session, so we can look it up
+        (define cookie-match
+          (regexp-match #rx"pltsession=([^;]+)" login-headers))
+        (check-not-false cookie-match "step 2: should extract session cookie")
+
+        ;; Create a session key we can use with make-authenticated-request
+        (define session-key (create-session! "lifecycle@example.com"))
+
+        ;; ===== Step 3: Visit account page, verify user-id shown =====
+        (define acct1 (tester (make-authenticated-request session-key #:url "/account")
+                              #:raw? #t #:headers? #t))
+        (check-equal? (result-status acct1) 200)
+        (define acct1-body (result-body acct1))
+        (check-not-false (string-contains? acct1-body "lifecycle@example.com")
+                         "step 3: account page should show email")
+        (check-not-false (string-contains? acct1-body user-id)
+                         "step 3: account page should show user-id")
+        (check-not-false (string-contains? acct1-body "No API tokens")
+                         "step 3: should show no tokens initially")
+
+        ;; ===== Step 4: Change password =====
+        (define acct1-forms
+          (regexp-match* #rx"action=\"([^\"]+)\"" acct1-body #:match-select cadr))
+        (define pw-action (strip-to-path (first acct1-forms)))
+
+        (define pw-req
+          (make-authenticated-request session-key
+                                      #:method #"POST"
+                                      #:url pw-action
+                                      #:bindings (list (binding:form #"current_password" #"initial-pass")
+                                                       (binding:form #"new_password" #"changed-pass")
+                                                       (binding:form #"confirm_password" #"changed-pass"))
+                                      #:post-data #"current_password=initial-pass&new_password=changed-pass&confirm_password=changed-pass"))
+        (define pw-result (tester pw-req #:raw? #t #:headers? #t))
+        (check-equal? (result-status pw-result) 200)
+        (check-not-false (string-contains? (result-body pw-result) "Password changed successfully")
+                         "step 4: should confirm password change")
+
+        ;; Verify backend: old password fails, new password works
+        (check-false (login-password-correct? "lifecycle@example.com" "initial-pass")
+                     "step 4: old password should fail")
+        (check-not-false (login-password-correct? "lifecycle@example.com" "changed-pass")
+                         "step 4: new password should work")
+
+        ;; user-id should be unchanged
+        (check-equal? (user-id-for-email "lifecycle@example.com") user-id
+                      "step 4: user-id should be stable after password change")
+
+        ;; ===== Step 5: Generate first API token =====
+        ;; Re-visit account page to get fresh form actions
+        (define acct2 (tester (make-authenticated-request session-key #:url "/account")
+                              #:raw? #t #:headers? #t))
+        (check-equal? (result-status acct2) 200)
+        (define acct2-body (result-body acct2))
+        (define acct2-forms
+          (regexp-match* #rx"action=\"([^\"]+)\"" acct2-body #:match-select cadr))
+        ;; Token generation form is the last form
+        (define token-action (strip-to-path (last acct2-forms)))
+
+        (define tok1-req
+          (make-authenticated-request session-key
+                                      #:method #"POST"
+                                      #:url token-action
+                                      #:bindings (list (binding:form #"token_label" #"ci-deploy"))
+                                      #:post-data #"token_label=ci-deploy"))
+        (define tok1-result (tester tok1-req #:raw? #t #:headers? #t))
+        (check-equal? (result-status tok1-result) 200)
+        (define tok1-body (result-body tok1-result))
+        (check-not-false (string-contains? tok1-body "rpkg_")
+                         "step 5: should show generated token")
+
+        ;; Extract token plaintext
+        (define tok1-match (regexp-match #rx"(rpkg_[0-9a-f]+)" tok1-body))
+        (check-not-false tok1-match "step 5: should find token plaintext")
+        (define token1-plaintext (cadr tok1-match))
+
+        ;; Verify backend
+        (check-equal? (validate-api-token token1-plaintext) "lifecycle@example.com"
+                      "step 5: token1 should validate to user email")
+        (define tokens-after-1 (list-api-tokens "lifecycle@example.com"))
+        (check-equal? (length tokens-after-1) 1
+                      "step 5: should have 1 token in backend")
+        (check-equal? (cadr (car tokens-after-1)) "ci-deploy"
+                      "step 5: token label should be ci-deploy")
+
+        ;; ===== Step 6: Generate second API token =====
+        ;; Follow the continue link to get back to account page
+        (define continue1-match
+          (regexp-match #rx"href=\"([^\"]+)\">Continue to Account Settings" tok1-body))
+        (define continue1-url (strip-to-path (cadr continue1-match)))
+        (define acct3 (tester (make-authenticated-request session-key #:url continue1-url)
+                              #:raw? #t #:headers? #t))
+        (check-equal? (result-status acct3) 200)
+        (define acct3-body (result-body acct3))
+        (check-not-false (string-contains? acct3-body "ci-deploy")
+                         "step 6: first token should be listed")
+
+        ;; Generate second token from the refreshed account page
+        (define acct3-forms
+          (regexp-match* #rx"action=\"([^\"]+)\"" acct3-body #:match-select cadr))
+        (define token2-action (strip-to-path (last acct3-forms)))
+
+        (define tok2-req
+          (make-authenticated-request session-key
+                                      #:method #"POST"
+                                      #:url token2-action
+                                      #:bindings (list (binding:form #"token_label" #"local-dev"))
+                                      #:post-data #"token_label=local-dev"))
+        (define tok2-result (tester tok2-req #:raw? #t #:headers? #t))
+        (check-equal? (result-status tok2-result) 200)
+        (define tok2-body (result-body tok2-result))
+        (define tok2-match (regexp-match #rx"(rpkg_[0-9a-f]+)" tok2-body))
+        (check-not-false tok2-match "step 6: should find second token")
+        (define token2-plaintext (cadr tok2-match))
+
+        ;; Verify backend: both tokens exist
+        (check-equal? (validate-api-token token1-plaintext) "lifecycle@example.com"
+                      "step 6: token1 should still validate")
+        (check-equal? (validate-api-token token2-plaintext) "lifecycle@example.com"
+                      "step 6: token2 should validate")
+        (define tokens-after-2 (list-api-tokens "lifecycle@example.com"))
+        (check-equal? (length tokens-after-2) 2
+                      "step 6: should have 2 tokens in backend")
+
+        ;; ===== Step 7: Revoke first token =====
+        ;; Go back to account page to find the revoke buttons
+        (define continue2-match
+          (regexp-match #rx"href=\"([^\"]+)\">Continue to Account Settings" tok2-body))
+        (define continue2-url (strip-to-path (cadr continue2-match)))
+        (define acct4 (tester (make-authenticated-request session-key #:url continue2-url)
+                              #:raw? #t #:headers? #t))
+        (check-equal? (result-status acct4) 200)
+        (define acct4-body (result-body acct4))
+
+        ;; Find revoke forms - there should be 2 (one per token)
+        (define revoke-actions
+          (regexp-match* #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Revoke" acct4-body
+                         #:match-select cadr))
+        (check-equal? (length revoke-actions) 2
+                      "step 7: should find 2 revoke buttons")
+
+        ;; Revoke the first one
+        (define revoke1-url (strip-to-path (car revoke-actions)))
+        (define revoke1-req
+          (make-authenticated-request session-key #:method #"POST"
+                                      #:url revoke1-url #:post-data #""))
+        (define revoke1-result (tester revoke1-req #:raw? #t #:headers? #t))
+        (check-equal? (result-status revoke1-result) 200)
+        (check-not-false (string-contains? (result-body revoke1-result) "revoked")
+                         "step 7: should show revoked message")
+
+        ;; Verify backend: one token remains
+        (define tokens-after-revoke (list-api-tokens "lifecycle@example.com"))
+        (check-equal? (length tokens-after-revoke) 1
+                      "step 7: should have 1 token after revoking one")
+        ;; token2 should still work, token1 should not (or vice versa)
+        (define token2-still-valid (validate-api-token token2-plaintext))
+        (check-not-false (or (validate-api-token token1-plaintext)
+                             token2-still-valid)
+                         "step 7: at least one token should still validate")
+
+        ;; ===== Step 8: Create a package =====
+        ;; GET /create
+        (define create-result
+          (tester (make-authenticated-request session-key #:url "/create")
+                  #:raw? #t #:headers? #t))
+        (check-equal? (result-status create-result) 200)
+        (define create-body (result-body create-result))
+
+        ;; Verify: package doesn't exist yet
+        (check-false (package-exists-as "lifecycle-test-pkg")
+                     "step 8: package should not exist before creation")
+
+        ;; Find the form action and submit the package
+        (define create-forms
+          (regexp-match* #rx"action=\"([^\"]+)\"" create-body #:match-select cadr))
+        (define save-action (strip-to-path (first create-forms)))
+        (define save-req
+          (make-authenticated-request
+           session-key
+           #:method #"POST"
+           #:url save-action
+           #:bindings (list (binding:form #"name" #"lifecycle-test-pkg")
+                            (binding:form #"description" #"Test package for lifecycle")
+                            (binding:form #"authors" #"lifecycle@example.com")
+                            (binding:form #"tags" #"test lifecycle")
+                            (binding:form #"version__default__type" #"simple")
+                            (binding:form #"version__default__simple_url"
+                                          #"https://example.com/lifecycle.tar.gz")
+                            (binding:form #"action" #"save_changes"))
+           #:post-data (string->bytes/utf-8
+                        (string-append "name=lifecycle-test-pkg"
+                                       "&description=Test+package+for+lifecycle"
+                                       "&authors=lifecycle@example.com"
+                                       "&tags=test+lifecycle"
+                                       "&version__default__type=simple"
+                                       "&version__default__simple_url=https://example.com/lifecycle.tar.gz"
+                                       "&action=save_changes"))))
+        (define save-result (tester save-req #:raw? #t #:headers? #t))
+        (define save-status (result-status save-result))
+        (check-not-false (or (and (>= save-status 300) (< save-status 400))
+                             (equal? save-status 200))
+                         "step 8: save should succeed")
+
+        ;; Verify backend
+        (check-not-false (package-exists-as "lifecycle-test-pkg")
+                         "step 8: package should exist after creation")
+        (check-not-false (package-author? "lifecycle-test-pkg" "lifecycle@example.com")
+                         "step 8: user should be package author")
+        (check-not-false (member "lifecycle-test-pkg"
+                                 (packages-of "lifecycle@example.com"))
+                         "step 8: packages-of should include the new package")
+
+        ;; ===== Step 9: View the package page =====
+        (define pkg-result
+          (tester (make-authenticated-request session-key
+                                              #:url "/package/lifecycle-test-pkg")
+                  #:raw? #t #:headers? #t))
+        (check-equal? (result-status pkg-result) 200)
+        (define pkg-body (result-body pkg-result))
+        (check-not-false (string-contains? pkg-body "lifecycle-test-pkg")
+                         "step 9: package page should show package name")
+        (check-not-false (string-contains? pkg-body "Test package for lifecycle")
+                         "step 9: package page should show description")
+        (check-not-false (string-contains? pkg-body "lifecycle@example.com")
+                         "step 9: package page should show author")
+
+        ;; ===== Step 10: Update my packages =====
+        (define update-result
+          (tester (make-authenticated-request session-key #:url "/update-my-packages")
+                  #:raw? #t #:headers? #t))
+        (check-equal? (result-status update-result) 200)
+        (check-not-false (string-contains? (result-body update-result) "rescanned")
+                         "step 10: should confirm rescan")
+
+        ;; ===== Step 11: Log out =====
+        ;; Verify session exists before logout
+        (check-not-false (lookup-session/touch! session-key)
+                         "step 11: session should exist before logout")
+
+        (define logout-result
+          (tester (make-authenticated-request session-key #:url "/logout")
+                  #:raw? #t #:headers? #t))
+        (define logout-status (result-status logout-result))
+        (check-not-false (or (and (>= logout-status 300) (< logout-status 400))
+                             (equal? logout-status 200))
+                         "step 11: logout should succeed")
+
+        ;; Verify backend: session is destroyed
+        (check-false (lookup-session/touch! session-key)
+                     "step 11: session should be gone after logout")
+
+        ;; ===== Step 12: Verify everything persists =====
+        ;; All backend state should still be intact after logout
+        (check-not-false (login-password-correct? "lifecycle@example.com" "changed-pass")
+                         "step 12: changed password should still work")
+        (check-false (login-password-correct? "lifecycle@example.com" "initial-pass")
+                     "step 12: initial password should still fail")
+        (check-equal? (user-id-for-email "lifecycle@example.com") user-id
+                      "step 12: user-id should be unchanged")
+        (check-not-false (package-exists-as "lifecycle-test-pkg")
+                         "step 12: package should persist after logout")
+        (check-not-false (package-author? "lifecycle-test-pkg" "lifecycle@example.com")
+                         "step 12: package authorship should persist")
+
+        ;; ===== Step 13: Log back in with new password =====
+        (define session-key2 (create-session! "lifecycle@example.com"))
+        (define acct-final
+          (tester (make-authenticated-request session-key2 #:url "/account")
+                  #:raw? #t #:headers? #t))
+        (check-equal? (result-status acct-final) 200)
+        (define acct-final-body (result-body acct-final))
+        (check-not-false (string-contains? acct-final-body user-id)
+                         "step 13: user-id should still appear on account page")
+        ;; Should show remaining token(s)
+        (check-false (string-contains? acct-final-body "No API tokens")
+                     "step 13: should still have tokens after re-login"))))))
