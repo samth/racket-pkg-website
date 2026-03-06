@@ -235,3 +235,162 @@
                            (check-equal? (validate-api-token t1) "user@example.com")
                            (check-equal? (validate-api-token t2) "user@example.com")
                            (check-equal? (length (list-api-tokens "user@example.com")) 2))))
+
+;; --- Return type tests ---
+;; These verify that functions return the correct types, not wrapped
+;; in extra lists from the userdb property storage format.
+
+(test-case "ensure-user-id! returns a string, not a list"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id (ensure-user-id! "user@example.com"))
+                           (check-pred string? id "ensure-user-id! first call should return string"))))
+
+(test-case "ensure-user-id! returns a string on second call"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (ensure-user-id! "user@example.com")
+                           (define id2 (ensure-user-id! "user@example.com"))
+                           (check-pred string? id2 "ensure-user-id! second call should return string"))))
+
+(test-case "user-id-for-email returns a string, not a list"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (ensure-user-id! "user@example.com")
+                           (define id (user-id-for-email "user@example.com"))
+                           (check-pred string? id "user-id-for-email should return string"))))
+
+(test-case "user-id-for-email matches ensure-user-id! on second call"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id1 (ensure-user-id! "user@example.com"))
+                           ;; Call ensure again to exercise the "existing" branch
+                           (define id2 (ensure-user-id! "user@example.com"))
+                           (define id3 (user-id-for-email "user@example.com"))
+                           (check-equal? id1 id2)
+                           (check-equal? id1 id3)
+                           (check-pred string? id3))))
+
+(test-case "github-username-for-email returns a string, not a list"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (link-github-account! "user@example.com" 12345 "myghuser" "user@example.com")
+                           (define name (github-username-for-email "user@example.com"))
+                           (check-pred string? name "github-username-for-email should return string")
+                           (check-equal? name "myghuser"))))
+
+(test-case "lookup-user-by-github-id returns a string email, not a list"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (link-github-account! "user@example.com" 12345 "ghuser" "user@example.com")
+                           (define email (lookup-user-by-github-id 12345))
+                           (check-pred string? email "lookup-user-by-github-id should return string")
+                           (check-equal? email "user@example.com"))))
+
+(test-case "list-api-tokens returns list of 3-element lists with correct types"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (generate-api-token! "user@example.com" "test-label")
+                           (define tokens (list-api-tokens "user@example.com"))
+                           (check-pred list? tokens)
+                           (check-equal? (length tokens) 1)
+                           (define tok (car tokens))
+                           (check-pred list? tok)
+                           (check-equal? (length tok) 3)
+                           (check-pred string? (car tok) "hash prefix should be string")
+                           (check-pred string? (cadr tok) "label should be string")
+                           (check-pred number? (caddr tok) "created should be number"))))
+
+(test-case "list-api-tokens returns empty list for user with no tokens"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-equal? (list-api-tokens "user@example.com") '()))))
+
+(test-case "list-api-tokens returns empty list for non-existent user"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-equal? (list-api-tokens "nobody@example.com") '()))))
+
+(test-case "validate-api-token returns a string email, not a list"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define token (generate-api-token! "user@example.com" "test"))
+                           (define email (validate-api-token token))
+                           (check-pred string? email "validate-api-token should return string")
+                           (check-equal? email "user@example.com"))))
+
+(test-case "user-exists?/email returns boolean"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (check-false (user-exists?/email "nobody@example.com"))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (check-not-false (user-exists?/email "user@example.com")))))
+
+;; --- Property stability across multiple saves ---
+;; The userdb serialization wraps values on each save, so properties
+;; must be correctly unwrapped even after other properties are modified.
+
+(test-case "user-id-for-email returns string after generating a token"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (ensure-user-id! "user@example.com")
+                           ;; Generate a token, which saves the user with api-tokens property
+                           (generate-api-token! "user@example.com" "test-token")
+                           ;; user-id should still be a string, not wrapped in a list
+                           (define id (user-id-for-email "user@example.com"))
+                           (check-pred string? id
+                                       "user-id-for-email must return string after token generation"))))
+
+(test-case "user-id-for-email returns string after linking GitHub"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (ensure-user-id! "user@example.com")
+                           (link-github-account! "user@example.com" 12345 "ghuser" "user@example.com")
+                           (define id (user-id-for-email "user@example.com"))
+                           (check-pred string? id
+                                       "user-id-for-email must return string after GitHub link"))))
+
+(test-case "github-username-for-email returns string after generating a token"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (link-github-account! "user@example.com" 12345 "ghuser" "user@example.com")
+                           (generate-api-token! "user@example.com" "test-token")
+                           (define name (github-username-for-email "user@example.com"))
+                           (check-pred string? name
+                                       "github-username must return string after token generation")
+                           (check-equal? name "ghuser"))))
+
+(test-case "user-id-for-email stable after multiple token operations"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id (ensure-user-id! "user@example.com"))
+                           (generate-api-token! "user@example.com" "t1")
+                           (generate-api-token! "user@example.com" "t2")
+                           (generate-api-token! "user@example.com" "t3")
+                           (define id-after (user-id-for-email "user@example.com"))
+                           (check-pred string? id-after)
+                           (check-equal? id id-after))))
+
+(test-case "ensure-user-id! returns string after password change"
+  (call-with-test-userdb (lambda (db)
+                           (initialize-users-for-testing! db (make-registration-state))
+                           (register-or-update-user! "user@example.com" "pass")
+                           (define id (ensure-user-id! "user@example.com"))
+                           ;; Password change re-saves the user
+                           (register-or-update-user! "user@example.com" "newpass")
+                           (define id2 (ensure-user-id! "user@example.com"))
+                           (check-pred string? id2)
+                           (check-equal? id id2))))
