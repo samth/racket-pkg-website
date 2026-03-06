@@ -350,7 +350,13 @@
                                          #:tags #f
                                          #:authors '("author@example.com")
                                          #:versions #f))
-                        ;; Wait briefly for background thread to write notice
-                        (sleep 1)
+                        ;; Poll for the background thread to write the notice file
+                        (define deadline (+ (current-inexact-milliseconds) 5000))
+                        (let loop ()
+                          (cond
+                            [(file-exists? notice-path) (void)]
+                            [(> (current-inexact-milliseconds) deadline)
+                             (fail "notice file not written within 5 seconds")]
+                            [else (sleep 0.1) (loop)]))
                         (check-true (file-exists? notice-path)
                                     "notice file should exist after package save"))))
