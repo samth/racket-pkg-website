@@ -13,6 +13,7 @@
          create-github-user!
          github-username-for-email
          user-exists?/email
+         has-password?
          generate-api-token!
          revoke-api-token!
          validate-api-token
@@ -54,7 +55,20 @@
                        #t ;; writeable!
                        ))
   (set! *codes* (make-persistent-state '*codes* (lambda () (make-registration-state))))
+  (migrate-has-password!)
   (log-racket-pkg-website/users-info "Will use sender address ~v" (sender-address)))
+
+;; One-time migration for legacy users who predate the 'has-password property.
+;; Any user without a 'github-id is an email+password user (GitHub OAuth is new
+;; in this branch), so their digest represents a real password they know.
+(define (migrate-has-password!)
+  (for ([email (in-list (list-users userdb))])
+    (define u (lookup-user userdb email (lambda _ #f)))
+    (when u
+      (define hp (user-property u 'has-password #f))
+      (define gid (user-property u 'github-id #f))
+      (when (and (not hp) (not gid))
+        (save-user! userdb (user-property-set u 'has-password #t))))))
 
 (define (initialize-users-for-testing! test-userdb test-codes-state)
   (set! userdb test-userdb)
@@ -114,8 +128,15 @@
   (ensure-initialized!)
   (log-racket-pkg-website/users-info "Updating user record ~v" email)
   (save-user! userdb
-              (user-password-set (or (lookup-user userdb email) (make-user email password))
-                                 password)))
+              (user-property-set
+               (user-password-set (or (lookup-user userdb email) (make-user email password))
+                                  password)
+               'has-password #t)))
+
+(define (has-password? email)
+  (ensure-initialized!)
+  (define u (lookup-user userdb email (lambda _ #f)))
+  (and u (user-property u 'has-password #f) #t))
 
 (define (generate-user-id)
   (define bs (crypto-random-bytes 16))
@@ -177,12 +198,16 @@
   (define old-gid (user-property u 'github-id #f))
   (when (and old-gid (not (equal? old-gid github-id)))
     (hash-remove! github-id-cache old-gid))
+  ;; link-github-account! runs only after password confirmation, so the user's
+  ;; digest represents a password they know.
   (save-user! userdb
               (user-property-set
                (user-property-set
-                (user-property-set u 'github-id github-id)
-                'github-username github-username)
-               'github-email github-email))
+                (user-property-set
+                 (user-property-set u 'github-id github-id)
+                 'github-username github-username)
+                'github-email github-email)
+               'has-password #t))
   (hash-set! github-id-cache github-id email))
 
 (define (create-github-user! email github-id github-username github-email)

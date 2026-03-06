@@ -29,7 +29,10 @@
   (if (user-exists? userdb email)
       (printf "  user ~a already exists, skipping\n" email)
       (begin
-        (save-user! userdb (user-password-set (make-user email password) password))
+        (save-user! userdb
+                    (user-property-set
+                     (user-password-set (make-user email password) password)
+                     'has-password #t))
         (printf "  created user ~a (password: ~a)\n" email password))))
 
 (printf "Creating users...\n")
