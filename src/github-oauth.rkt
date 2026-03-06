@@ -21,6 +21,10 @@
 
 (define-logger racket-pkg-website/github-oauth)
 
+;; Base URLs, parameterized for testing with a mock server
+(define current-github-oauth-base (make-parameter "https://github.com"))
+(define current-github-api-base (make-parameter "https://api.github.com"))
+
 ;; Config accessors
 (define (github-login-client-id)
   (@ (config) github-login-client-id))
@@ -71,7 +75,8 @@
 (define (github-authorize-url redirect-uri)
   (define state (generate-csrf-state!))
   (expire-csrf-states!)
-  (format "https://github.com/login/oauth/authorize?client_id=~a&redirect_uri=~a&scope=~a&state=~a"
+  (format "~a/login/oauth/authorize?client_id=~a&redirect_uri=~a&scope=~a&state=~a"
+          (current-github-oauth-base)
           (github-login-client-id)
           (uri-encode redirect-uri)
           "user:email"
@@ -91,7 +96,7 @@
 (define (github-exchange-code code redirect-uri)
   (log-racket-pkg-website/github-oauth-info "Exchanging OAuth code for token")
   (define resp
-    (post "https://github.com/login/oauth/access_token"
+    (post (format "~a/login/oauth/access_token" (current-github-oauth-base))
           #:headers (hasheq 'accept "application/json")
           #:form (list (cons 'client_id (github-login-client-id))
                        (cons 'client_secret (github-login-client-secret))
@@ -116,7 +121,7 @@
   (define auth-headers
     (hasheq 'authorization (format "Bearer ~a" access-token) 'user-agent "racket-pkg-website"))
   ;; Get user profile
-  (define user-resp (get "https://api.github.com/user" #:headers auth-headers))
+  (define user-resp (get (format "~a/user" (current-github-api-base)) #:headers auth-headers))
   (define user-data (response-json/safe user-resp))
   (define github-id (and (hash? user-data) (hash-ref user-data 'id #f)))
   (define github-username (and (hash? user-data) (hash-ref user-data 'login #f)))
@@ -126,7 +131,7 @@
      (values #f #f #f)]
     [else
      ;; Get verified emails
-     (define emails-resp (get "https://api.github.com/user/emails" #:headers auth-headers))
+     (define emails-resp (get (format "~a/user/emails" (current-github-api-base)) #:headers auth-headers))
      (define emails-data (response-json/safe emails-resp))
      (cond
        [(not (list? emails-data))
@@ -154,4 +159,6 @@
   (provide generate-csrf-state!
            validate-csrf-state!
            expire-csrf-states!
-           csrf-states))
+           csrf-states
+           current-github-oauth-base
+           current-github-api-base))
