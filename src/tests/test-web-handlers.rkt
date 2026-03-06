@@ -848,3 +848,334 @@
                          "account page should still show User ID after token generation")
         (check-not-false (string-contains? body3 "test-ci")
                          "account page should show the new token in the list"))))))
+
+;; --- Authenticated multi-step flows ---
+
+;; Helper: set up test env with a logged-in user, run thunk with session-key
+(define (call-with-logged-in-user email password thunk)
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
+        (initialize-users-for-testing! db (make-registration-state))
+        (set-userdb-for-testing! db)
+        (register-or-update-user! email password)
+        (ensure-user-id! email)
+        (define session-key (create-session! email))
+        (thunk session-key))))))
+
+(test-case "e2e: change password via account page"
+  (call-with-logged-in-user "pwchange@example.com" "oldpass"
+    (lambda (session-key)
+      ;; Step 1: GET /account
+      (define result1 (tester (make-authenticated-request session-key #:url "/account")
+                              #:raw? #t #:headers? #t))
+      (check-equal? (result-status result1) 200)
+      (define body1 (result-body result1))
+      (check-not-false (string-contains? body1 "Change Password"))
+
+      ;; Step 2: Find the password change form action (first form after Account Info)
+      (define form-actions
+        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
+      ;; Password change form is the first form with an action
+      (define pw-form-action (strip-to-path (first form-actions)))
+
+      ;; Step 3: POST password change
+      (define req2
+        (make-authenticated-request session-key
+                                    #:method #"POST"
+                                    #:url pw-form-action
+                                    #:bindings (list (binding:form #"current_password" #"oldpass")
+                                                     (binding:form #"new_password" #"newpass")
+                                                     (binding:form #"confirm_password" #"newpass"))
+                                    #:post-data #"current_password=oldpass&new_password=newpass&confirm_password=newpass"))
+      (define result2 (tester req2 #:raw? #t #:headers? #t))
+      (check-equal? (result-status result2) 200)
+      (define body2 (result-body result2))
+      (check-not-false (string-contains? body2 "Password changed successfully")
+                       "should show success message")
+
+      ;; Verify: old password no longer works, new one does
+      (check-false (login-password-correct? "pwchange@example.com" "oldpass"))
+      (check-not-false (login-password-correct? "pwchange@example.com" "newpass")))))
+
+(test-case "e2e: change password fails with wrong current password"
+  (call-with-logged-in-user "pwfail@example.com" "realpass"
+    (lambda (session-key)
+      ;; Step 1: GET /account
+      (define result1 (tester (make-authenticated-request session-key #:url "/account")
+                              #:raw? #t #:headers? #t))
+      (define form-actions
+        (regexp-match* #rx"action=\"([^\"]+)\"" (result-body result1) #:match-select cadr))
+      (define pw-form-action (strip-to-path (first form-actions)))
+
+      ;; Step 2: POST with wrong current password
+      (define req2
+        (make-authenticated-request session-key
+                                    #:method #"POST"
+                                    #:url pw-form-action
+                                    #:bindings (list (binding:form #"current_password" #"wrongpass")
+                                                     (binding:form #"new_password" #"newpass")
+                                                     (binding:form #"confirm_password" #"newpass"))
+                                    #:post-data #"current_password=wrongpass&new_password=newpass&confirm_password=newpass"))
+      (define result2 (tester req2 #:raw? #t #:headers? #t))
+      (check-equal? (result-status result2) 200)
+      (check-not-false (string-contains? (result-body result2) "incorrect")
+                       "should show error about incorrect password")
+
+      ;; Password unchanged
+      (check-not-false (login-password-correct? "pwfail@example.com" "realpass")))))
+
+(test-case "e2e: generate and revoke a token"
+  (call-with-logged-in-user "revoke@example.com" "pass"
+    (lambda (session-key)
+      ;; Step 1: GET /account
+      (define result1 (tester (make-authenticated-request session-key #:url "/account")
+                              #:raw? #t #:headers? #t))
+      (check-equal? (result-status result1) 200)
+      (define body1 (result-body result1))
+
+      ;; Verify: no tokens yet in backend
+      (check-equal? (list-api-tokens "revoke@example.com") '()
+                    "should start with no tokens")
+
+      ;; Step 2: Generate a token
+      (define form-actions1
+        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
+      (define token-form-action (strip-to-path (last form-actions1)))
+      (define req2
+        (make-authenticated-request session-key
+                                    #:method #"POST"
+                                    #:url token-form-action
+                                    #:bindings (list (binding:form #"token_label" #"deploy-key"))
+                                    #:post-data #"token_label=deploy-key"))
+      (define result2 (tester req2 #:raw? #t #:headers? #t))
+      (check-equal? (result-status result2) 200)
+      (define body2 (result-body result2))
+      (check-not-false (string-contains? body2 "rpkg_"))
+
+      ;; Verify: token exists in backend
+      (define tokens-after (list-api-tokens "revoke@example.com"))
+      (check-equal? (length tokens-after) 1 "should have 1 token in backend")
+      (check-equal? (cadr (car tokens-after)) "deploy-key"
+                    "token label should be deploy-key")
+
+      ;; Extract the plaintext token and verify it validates
+      (define token-match (regexp-match #rx"(rpkg_[0-9a-f]+)" body2))
+      (check-not-false token-match "should find token plaintext")
+      (define plaintext (cadr token-match))
+      (check-equal? (validate-api-token plaintext) "revoke@example.com"
+                    "token should validate to the user's email")
+
+      ;; Step 3: Follow continue link back to account
+      (define continue-match
+        (regexp-match #rx"href=\"([^\"]+)\">Continue to Account Settings" body2))
+      (define continue-url (strip-to-path (cadr continue-match)))
+      (define result3 (tester (make-authenticated-request session-key #:url continue-url)
+                              #:raw? #t #:headers? #t))
+      (check-equal? (result-status result3) 200)
+      (define body3 (result-body result3))
+      (check-not-false (string-contains? body3 "deploy-key")
+                       "token should appear in the list")
+
+      ;; Step 4: Find and click the revoke button for the token
+      (define revoke-actions
+        (regexp-match* #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Revoke" body3
+                       #:match-select cadr))
+      (check-not-false (pair? revoke-actions) "should find revoke form")
+      (define revoke-url (strip-to-path (car revoke-actions)))
+      (define req4
+        (make-authenticated-request session-key #:method #"POST" #:url revoke-url
+                                    #:post-data #""))
+      (define result4 (tester req4 #:raw? #t #:headers? #t))
+      (check-equal? (result-status result4) 200)
+      (check-not-false (string-contains? (result-body result4) "revoked")
+                       "should show token revoked message")
+
+      ;; Verify: token no longer validates in backend
+      (check-false (validate-api-token plaintext)
+                   "revoked token should no longer validate")
+      (check-equal? (list-api-tokens "revoke@example.com") '()
+                    "should have no tokens after revocation"))))
+
+(test-case "e2e: create a new package via the web form"
+  (call-with-logged-in-user "creator@example.com" "pass"
+    (lambda (session-key)
+      ;; Verify: package does not exist yet
+      (check-false (package-exists-as "my-new-test-pkg")
+                   "package should not exist before creation")
+
+      ;; Step 1: GET /create
+      (define result1 (tester (make-authenticated-request session-key #:url "/create")
+                              #:raw? #t #:headers? #t))
+      (check-equal? (result-status result1) 200)
+      (define body1 (result-body result1))
+      (check-not-false (string-contains? body1 "Package Name"))
+
+      ;; Step 2: Find the save form action and submit a new package
+      (define form-actions
+        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
+      (define save-action (strip-to-path (first form-actions)))
+      (define req2
+        (make-authenticated-request session-key
+                                    #:method #"POST"
+                                    #:url save-action
+                                    #:bindings (list (binding:form #"name" #"my-new-test-pkg")
+                                                     (binding:form #"description" #"A test package")
+                                                     (binding:form #"authors" #"creator@example.com")
+                                                     (binding:form #"tags" #"test")
+                                                     (binding:form #"version__default__type" #"simple")
+                                                     (binding:form #"version__default__simple_url" #"https://example.com/pkg.tar.gz")
+                                                     (binding:form #"action" #"save_changes"))
+                                    #:post-data #"name=my-new-test-pkg&description=A+test+package&authors=creator@example.com&tags=test&version__default__type=simple&version__default__simple_url=https://example.com/pkg.tar.gz&action=save_changes"))
+      (define result2 (tester req2 #:raw? #t #:headers? #t))
+      ;; Should redirect to the package page on success
+      (define status2 (result-status result2))
+      (check-not-false (or (and (>= status2 300) (< status2 400))
+                           (equal? status2 200))
+                       "should redirect or show success")
+
+      ;; Verify: package now exists in backend
+      (check-not-false (package-exists-as "my-new-test-pkg")
+                       "package should exist in backend after creation")
+
+      ;; Verify: creator is the package author
+      (check-not-false (package-author? "my-new-test-pkg" "creator@example.com")
+                       "creator should be the package author"))))
+
+(test-case "e2e: update-my-packages rescans user's packages"
+  (call-with-logged-in-user "updater@example.com" "pass"
+    (lambda (session-key)
+      ;; Create a package so this user has something to update
+      (parameterize ([current-user "updater@example.com"])
+        (save-package! #:old-name ""
+                       #:new-name "updater-pkg"
+                       #:description "a package"
+                       #:source "https://example.com/pkg.tar.gz"
+                       #:tags '()
+                       #:authors (list "updater@example.com")
+                       #:versions '()))
+
+      ;; Verify: user owns the package
+      (check-not-false (package-author? "updater-pkg" "updater@example.com")
+                       "user should own the package before update")
+      (check-not-false (member "updater-pkg" (packages-of "updater@example.com"))
+                       "packages-of should list the package")
+
+      ;; Step 1: GET /update-my-packages
+      (define result
+        (tester (make-authenticated-request session-key #:url "/update-my-packages")
+                #:raw? #t #:headers? #t))
+      (check-equal? (result-status result) 200)
+      (define body (result-body result))
+      (check-not-false (string-contains? body "rescanned")
+                       "should show packages being rescanned message"))))
+
+;; --- Unauthenticated multi-step flows ---
+
+(test-case "e2e: login page links to register page"
+  ;; Step 1: GET /login
+  (define result1 (tester "/login" #:raw? #t #:headers? #t))
+  (check-equal? (result-status result1) 200)
+  (define body1 (result-body result1))
+  (check-not-false (string-contains? body1 "Register an account"))
+
+  ;; Step 2: Find and follow the "Register an account" link
+  (define register-match
+    (regexp-match #rx"href=\"([^\"]+)\"[^>]*>Register an account" body1))
+  (check-not-false register-match "should find register link")
+  (define register-url (strip-to-path (cadr register-match)))
+  (define result2 (tester register-url #:raw? #t #:headers? #t))
+  (check-equal? (result-status result2) 200)
+  (define body2 (result-body result2))
+  (check-not-false (string-contains? body2 "Step 1")
+                   "register page should show Step 1")
+  (check-not-false (string-contains? body2 "Email me a code")
+                   "register page should show email code button"))
+
+(test-case "e2e: register page shows error for missing email"
+  ;; Step 1: GET /register-or-reset
+  (define result1 (tester "/register-or-reset" #:raw? #t #:headers? #t))
+  (check-equal? (result-status result1) 200)
+  (define body1 (result-body result1))
+
+  ;; Step 2: Find the "Email me a code" form and submit with empty email
+  (define form-actions
+    (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
+  (check-not-false (pair? form-actions) "should find form actions")
+  ;; The first form action is the "Email me a code" form
+  (define code-form-action (strip-to-path (first form-actions)))
+  (define req2
+    (request #"POST"
+             (string->url code-form-action)
+             (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+             (delay (list (binding:form #"email_for_code" #"")
+                          (binding:form #"question_answer" #"")
+                          (binding:form #"body" #"")))
+             #"email_for_code=&question_answer=&body="
+             "127.0.0.1" 80 "127.0.0.1"))
+  (define result2 (tester req2 #:raw? #t #:headers? #t))
+  (check-equal? (result-status result2) 200)
+  (define body2 (result-body result2))
+  (check-not-false (string-contains? body2 "email")
+                   "should show error about email"))
+
+(test-case "e2e: register page shows error for wrong code"
+  (call-with-logged-in-user "codeuser@example.com" "pass"
+    (lambda (_session-key)
+      ;; Step 1: GET /register-or-reset
+      (define result1 (tester "/register-or-reset" #:raw? #t #:headers? #t))
+      (check-equal? (result-status result1) 200)
+      (define body1 (result-body result1))
+
+      ;; Step 2: Find the "Continue" form (step 2 form) and submit with wrong code
+      (define form-actions
+        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
+      (check-true (>= (length form-actions) 2) "should find at least 2 form actions")
+      ;; The second form action is the "use code" form
+      (define code-form-action (strip-to-path (second form-actions)))
+      (define req2
+        (request #"POST"
+                 (string->url code-form-action)
+                 (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                 (delay (list (binding:form #"email" #"codeuser@example.com")
+                              (binding:form #"code" #"wrongcode")
+                              (binding:form #"password" #"newpass")
+                              (binding:form #"confirm_password" #"newpass")))
+                 #"email=codeuser@example.com&code=wrongcode&password=newpass&confirm_password=newpass"
+                 "127.0.0.1" 80 "127.0.0.1"))
+      (define result2 (tester req2 #:raw? #t #:headers? #t))
+      (check-equal? (result-status result2) 200)
+      (define body2 (result-body result2))
+      (check-not-false (string-contains? body2 "incorrect")
+                       "should show error about incorrect code"))))
+
+(test-case "e2e: search page with query renders results"
+  ;; Step 1: GET /search (empty)
+  (define result1 (tester "/search" #:raw? #t #:headers? #t))
+  (check-equal? (result-status result1) 200)
+  (define body1 (result-body result1))
+  (check-not-false (string-contains? body1 "Search")
+                   "search page should render")
+
+  ;; Step 2: GET /search with query parameter
+  (define result2 (tester "/search?q=nonexistent-pkg-xyz" #:raw? #t #:headers? #t))
+  (check-equal? (result-status result2) 200)
+  (define body2 (result-body result2))
+  (check-not-false (string-contains? body2 "Search")
+                   "search results page should render")
+  ;; The search input should have the query pre-filled
+  (check-not-false (string-contains? body2 "nonexistent-pkg-xyz")
+                   "search query should appear in the page"))
+
+(test-case "e2e: nonexistent package page has navigation back to index"
+  ;; Step 1: GET /package/does-not-exist-pkg
+  (define result1 (tester "/package/does-not-exist-pkg" #:raw? #t #:headers? #t))
+  (check-equal? (result-status result1) 404)
+  (define body1 (result-body result1))
+  (check-not-false (string-contains? body1 "does not exist")
+                   "should say package does not exist")
+  (check-not-false (string-contains? body1 "does-not-exist-pkg")
+                   "should mention the package name")
+  (check-not-false (string-contains? body1 "package index")
+                   "should have link to return to package index"))
