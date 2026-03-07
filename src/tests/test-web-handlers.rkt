@@ -171,6 +171,12 @@
   (define result (tester "/json/search-completions" #:raw? #t #:headers? #t))
   (check-not-false (string-contains? (result-headers-str result) "Access-Control-Allow-Origin")))
 
+;; --- End-to-end test: account page survives token generation ---
+;; This test catches the bug where user-id-for-email returned a list
+;; instead of a string after a token was generated (due to property
+;; value wrapping in the userdb serialization layer). The account page
+;; would crash with an xexpr contract violation on the second render.
+
 ;; Helper: make a request struct with a signed session cookie
 (define (make-authenticated-request session-key
                                     #:method [method #"GET"]
@@ -197,593 +203,6 @@
 (define (strip-to-path url-str)
   (define u (string->url url-str))
   (url->string (struct-copy url u [scheme #f] [host #f] [port #f] [user #f])))
-
-;; --- Authenticated multi-step flows ---
-
-;; Helper: set up test env with a logged-in user, run thunk with session-key
-(define (call-with-logged-in-user email password thunk)
-  (call-with-test-userdb
-   (lambda (db)
-     (call-with-test-packages-dir
-      (lambda (pkgs-dir)
-        (initialize-users-for-testing! db (make-registration-state))
-        (set-userdb-for-testing! db)
-        (register-or-update-user! email password)
-        (ensure-user-id! email)
-        (define session-key (create-session! email))
-        (thunk session-key))))))
-
-(test-case "e2e: change password via account page"
-  (call-with-logged-in-user "pwchange@example.com" "oldpass"
-    (lambda (session-key)
-      ;; Step 1: GET /account
-      (define result1 (tester (make-authenticated-request session-key #:url "/account")
-                              #:raw? #t #:headers? #t))
-      (check-equal? (result-status result1) 200)
-      (define body1 (result-body result1))
-      (check-not-false (string-contains? body1 "Change Password"))
-
-      ;; Step 2: Find the password change form action (first form after Account Info)
-      (define form-actions
-        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
-      ;; Password change form is the first form with an action
-      (define pw-form-action (strip-to-path (first form-actions)))
-
-      ;; Step 3: POST password change
-      (define req2
-        (make-authenticated-request session-key
-                                    #:method #"POST"
-                                    #:url pw-form-action
-                                    #:bindings (list (binding:form #"current_password" #"oldpass")
-                                                     (binding:form #"new_password" #"newpass")
-                                                     (binding:form #"confirm_password" #"newpass"))
-                                    #:post-data #"current_password=oldpass&new_password=newpass&confirm_password=newpass"))
-      (define result2 (tester req2 #:raw? #t #:headers? #t))
-      (check-equal? (result-status result2) 200)
-      (define body2 (result-body result2))
-      (check-not-false (string-contains? body2 "Password changed successfully")
-                       "should show success message")
-
-      ;; Verify: old password no longer works, new one does
-      (check-false (login-password-correct? "pwchange@example.com" "oldpass"))
-      (check-not-false (login-password-correct? "pwchange@example.com" "newpass")))))
-
-(test-case "e2e: change password fails with wrong current password"
-  (call-with-logged-in-user "pwfail@example.com" "realpass"
-    (lambda (session-key)
-      ;; Step 1: GET /account
-      (define result1 (tester (make-authenticated-request session-key #:url "/account")
-                              #:raw? #t #:headers? #t))
-      (define form-actions
-        (regexp-match* #rx"action=\"([^\"]+)\"" (result-body result1) #:match-select cadr))
-      (define pw-form-action (strip-to-path (first form-actions)))
-
-      ;; Step 2: POST with wrong current password
-      (define req2
-        (make-authenticated-request session-key
-                                    #:method #"POST"
-                                    #:url pw-form-action
-                                    #:bindings (list (binding:form #"current_password" #"wrongpass")
-                                                     (binding:form #"new_password" #"newpass")
-                                                     (binding:form #"confirm_password" #"newpass"))
-                                    #:post-data #"current_password=wrongpass&new_password=newpass&confirm_password=newpass"))
-      (define result2 (tester req2 #:raw? #t #:headers? #t))
-      (check-equal? (result-status result2) 200)
-      (check-not-false (string-contains? (result-body result2) "incorrect")
-                       "should show error about incorrect password")
-
-      ;; Password unchanged
-      (check-not-false (login-password-correct? "pwfail@example.com" "realpass")))))
-
-
-(test-case "e2e: create a new package via the web form"
-  (call-with-logged-in-user "creator@example.com" "pass"
-    (lambda (session-key)
-      ;; Verify: package does not exist yet
-      (check-false (package-exists-as "my-new-test-pkg")
-                   "package should not exist before creation")
-
-      ;; Step 1: GET /create
-      (define result1 (tester (make-authenticated-request session-key #:url "/create")
-                              #:raw? #t #:headers? #t))
-      (check-equal? (result-status result1) 200)
-      (define body1 (result-body result1))
-      (check-not-false (string-contains? body1 "Package Name"))
-
-      ;; Step 2: Find the save form action and submit a new package
-      (define form-actions
-        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
-      (define save-action (strip-to-path (first form-actions)))
-      (define req2
-        (make-authenticated-request session-key
-                                    #:method #"POST"
-                                    #:url save-action
-                                    #:bindings (list (binding:form #"name" #"my-new-test-pkg")
-                                                     (binding:form #"description" #"A test package")
-                                                     (binding:form #"authors" #"creator@example.com")
-                                                     (binding:form #"tags" #"test")
-                                                     (binding:form #"version__default__type" #"simple")
-                                                     (binding:form #"version__default__simple_url" #"https://example.com/pkg.tar.gz")
-                                                     (binding:form #"action" #"save_changes"))
-                                    #:post-data #"name=my-new-test-pkg&description=A+test+package&authors=creator@example.com&tags=test&version__default__type=simple&version__default__simple_url=https://example.com/pkg.tar.gz&action=save_changes"))
-      (define result2 (tester req2 #:raw? #t #:headers? #t))
-      ;; Should redirect to the package page on success
-      (define status2 (result-status result2))
-      (check-not-false (or (and (>= status2 300) (< status2 400))
-                           (equal? status2 200))
-                       "should redirect or show success")
-
-      ;; Verify: package now exists in backend
-      (check-not-false (package-exists-as "my-new-test-pkg")
-                       "package should exist in backend after creation")
-
-      ;; Verify: creator is the package author
-      (check-not-false (package-author? "my-new-test-pkg" "creator@example.com")
-                       "creator should be the package author"))))
-
-(test-case "e2e: update-my-packages rescans user's packages"
-  (call-with-logged-in-user "updater@example.com" "pass"
-    (lambda (session-key)
-      ;; Create a package so this user has something to update
-      (parameterize ([current-user "updater@example.com"])
-        (save-package! #:old-name ""
-                       #:new-name "updater-pkg"
-                       #:description "a package"
-                       #:source "https://example.com/pkg.tar.gz"
-                       #:tags '()
-                       #:authors (list "updater@example.com")
-                       #:versions '()))
-
-      ;; Verify: user owns the package
-      (check-not-false (package-author? "updater-pkg" "updater@example.com")
-                       "user should own the package before update")
-      (check-not-false (member "updater-pkg" (packages-of "updater@example.com"))
-                       "packages-of should list the package")
-
-      ;; Step 1: GET /update-my-packages
-      (define result
-        (tester (make-authenticated-request session-key #:url "/update-my-packages")
-                #:raw? #t #:headers? #t))
-      (check-equal? (result-status result) 200)
-      (define body (result-body result))
-      (check-not-false (string-contains? body "rescanned")
-                       "should show packages being rescanned message"))))
-
-;; --- Unauthenticated multi-step flows ---
-
-(test-case "e2e: login page links to register page"
-  ;; Step 1: GET /login
-  (define result1 (tester "/login" #:raw? #t #:headers? #t))
-  (check-equal? (result-status result1) 200)
-  (define body1 (result-body result1))
-  (check-not-false (string-contains? body1 "Register an account"))
-
-  ;; Step 2: Find and follow the "Register an account" link
-  (define register-match
-    (regexp-match #rx"href=\"([^\"]+)\"[^>]*>Register an account" body1))
-  (check-not-false register-match "should find register link")
-  (define register-url (strip-to-path (cadr register-match)))
-  (define result2 (tester register-url #:raw? #t #:headers? #t))
-  (check-equal? (result-status result2) 200)
-  (define body2 (result-body result2))
-  (check-not-false (string-contains? body2 "Step 1")
-                   "register page should show Step 1")
-  (check-not-false (string-contains? body2 "Email me a code")
-                   "register page should show email code button"))
-
-(test-case "e2e: register page shows error for missing email"
-  ;; Step 1: GET /register-or-reset
-  (define result1 (tester "/register-or-reset" #:raw? #t #:headers? #t))
-  (check-equal? (result-status result1) 200)
-  (define body1 (result-body result1))
-
-  ;; Step 2: Find the "Email me a code" form and submit with empty email
-  (define form-actions
-    (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
-  (check-not-false (pair? form-actions) "should find form actions")
-  ;; The first form action is the "Email me a code" form
-  (define code-form-action (strip-to-path (first form-actions)))
-  (define req2
-    (request #"POST"
-             (string->url code-form-action)
-             (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
-             (delay (list (binding:form #"email_for_code" #"")
-                          (binding:form #"question_answer" #"")
-                          (binding:form #"body" #"")))
-             #"email_for_code=&question_answer=&body="
-             "127.0.0.1" 80 "127.0.0.1"))
-  (define result2 (tester req2 #:raw? #t #:headers? #t))
-  (check-equal? (result-status result2) 200)
-  (define body2 (result-body result2))
-  (check-not-false (string-contains? body2 "email")
-                   "should show error about email"))
-
-(test-case "e2e: register page shows error for wrong code"
-  (call-with-logged-in-user "codeuser@example.com" "pass"
-    (lambda (_session-key)
-      ;; Step 1: GET /register-or-reset
-      (define result1 (tester "/register-or-reset" #:raw? #t #:headers? #t))
-      (check-equal? (result-status result1) 200)
-      (define body1 (result-body result1))
-
-      ;; Step 2: Find the "Continue" form (step 2 form) and submit with wrong code
-      (define form-actions
-        (regexp-match* #rx"action=\"([^\"]+)\"" body1 #:match-select cadr))
-      (check-true (>= (length form-actions) 2) "should find at least 2 form actions")
-      ;; The second form action is the "use code" form
-      (define code-form-action (strip-to-path (second form-actions)))
-      (define req2
-        (request #"POST"
-                 (string->url code-form-action)
-                 (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
-                 (delay (list (binding:form #"email" #"codeuser@example.com")
-                              (binding:form #"code" #"wrongcode")
-                              (binding:form #"password" #"newpass")
-                              (binding:form #"confirm_password" #"newpass")))
-                 #"email=codeuser@example.com&code=wrongcode&password=newpass&confirm_password=newpass"
-                 "127.0.0.1" 80 "127.0.0.1"))
-      (define result2 (tester req2 #:raw? #t #:headers? #t))
-      (check-equal? (result-status result2) 200)
-      (define body2 (result-body result2))
-      (check-not-false (string-contains? body2 "incorrect")
-                       "should show error about incorrect code"))))
-
-(test-case "e2e: search page with query renders results"
-  ;; Step 1: GET /search (empty)
-  (define result1 (tester "/search" #:raw? #t #:headers? #t))
-  (check-equal? (result-status result1) 200)
-  (define body1 (result-body result1))
-  (check-not-false (string-contains? body1 "Search")
-                   "search page should render")
-
-  ;; Step 2: GET /search with query parameter
-  (define result2 (tester "/search?q=nonexistent-pkg-xyz" #:raw? #t #:headers? #t))
-  (check-equal? (result-status result2) 200)
-  (define body2 (result-body result2))
-  (check-not-false (string-contains? body2 "Search")
-                   "search results page should render")
-  ;; The search input should have the query pre-filled
-  (check-not-false (string-contains? body2 "nonexistent-pkg-xyz")
-                   "search query should appear in the page"))
-
-(test-case "e2e: nonexistent package page has navigation back to index"
-  ;; Step 1: GET /package/does-not-exist-pkg
-  (define result1 (tester "/package/does-not-exist-pkg" #:raw? #t #:headers? #t))
-  (check-equal? (result-status result1) 404)
-  (define body1 (result-body result1))
-  (check-not-false (string-contains? body1 "does not exist")
-                   "should say package does not exist")
-  (check-not-false (string-contains? body1 "does-not-exist-pkg")
-                   "should mention the package name")
-  (check-not-false (string-contains? body1 "package index")
-                   "should have link to return to package index"))
-
-;; --- Comprehensive auth + account lifecycle test ---
-
-
-;; Access the persistent config handler so we can set test config values
-(define config-handler (make-persistent-state '*config* (lambda () (hash))))
-
-;; Save the original config to restore after each test
-(define original-config (config-handler))
-
-;; Helper: run thunk with GitHub OAuth configured and mock exchange/user-info functions.
-;; fake-exchange: code redirect-uri -> access-token-or-#f
-;; fake-user-info: access-token -> (values github-id github-username verified-emails)
-(define (call-with-github-oauth fake-exchange fake-user-info thunk)
-  (call-with-test-userdb
-   (lambda (db)
-     (call-with-test-packages-dir
-      (lambda (pkgs-dir)
-        (initialize-users-for-testing! db (make-registration-state))
-        (set-userdb-for-testing! db)
-        ;; Enable GitHub OAuth in config
-        (config-handler (hash-set* original-config
-                                    'github-login-client-id "test-client-id"
-                                    'github-login-client-secret "test-client-secret"))
-        (dynamic-wind
-          void
-          (lambda ()
-            (parameterize ([current-github-exchange-code fake-exchange]
-                           [current-github-get-user-info fake-user-info])
-              (thunk db)))
-          (lambda ()
-            (config-handler original-config))))))))
-
-;; Helper: build a GitHub callback request with code and state params
-(define (make-github-callback-request code state)
-  (define qs (if state
-                 (format "code=~a&state=~a" code state)
-                 (format "code=~a" code)))
-  (request #"GET"
-           (string->url (string-append "/auth/github/callback?" qs))
-           '()
-           (delay (list (binding:form (string->bytes/utf-8 "code")
-                                      (string->bytes/utf-8 code))
-                        (binding:form (string->bytes/utf-8 "state")
-                                      (string->bytes/utf-8 (or state "")))))
-           #f
-           "127.0.0.1" 80 "127.0.0.1"))
-
-(test-case "github: new user — creates account and session"
-  (call-with-github-oauth
-   ;; Mock exchange: always return a token
-   (lambda (code redirect-uri) "fake-access-token")
-   ;; Mock user-info: return a new GitHub user
-   (lambda (token)
-     (values 12345 "ghuser" (list "ghuser@example.com")))
-   (lambda (db)
-     ;; Verify: user does not exist yet
-     (check-false (user-exists?/email "ghuser@example.com")
-                  "user should not exist before GitHub login")
-
-     ;; Generate a valid CSRF state
-     (define state (generate-csrf-state!))
-
-     ;; Hit the callback
-     (define result (tester (make-github-callback-request "test-code" state)
-                            #:raw? #t #:headers? #t))
-     (define headers (result-headers-str result))
-
-     ;; Should set a session cookie (successful login)
-     (check-not-false (string-contains? headers "pltsession=")
-                      "should set session cookie for new GitHub user")
-
-     ;; Verify backend: user was created
-     (check-not-false (user-exists?/email "ghuser@example.com")
-                      "user should exist after GitHub login")
-
-     ;; Verify backend: GitHub ID linked
-     (check-equal? (lookup-user-by-github-id 12345) "ghuser@example.com"
-                   "GitHub ID should map to the new user")
-
-     ;; Verify backend: GitHub username stored
-     (check-equal? (github-username-for-email "ghuser@example.com") "ghuser"
-                   "GitHub username should be stored")
-
-     ;; Verify backend: user-id was assigned
-     (check-not-false (user-id-for-email "ghuser@example.com")
-                      "user-id should be assigned on login"))))
-
-(test-case "github: known user — logs in directly"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   (lambda (token)
-     (values 67890 "returning-user" (list "returning@example.com")))
-   (lambda (db)
-     ;; Pre-create the user with GitHub ID already linked
-     (register-or-update-user! "returning@example.com" "some-pass")
-     (ensure-user-id! "returning@example.com")
-     (link-github-account! "returning@example.com" 67890 "returning-user"
-                           "returning@example.com")
-
-     (define state (generate-csrf-state!))
-     (define result (tester (make-github-callback-request "code" state)
-                            #:raw? #t #:headers? #t))
-     (define headers (result-headers-str result))
-
-     ;; Should set session cookie
-     (check-not-false (string-contains? headers "pltsession=")
-                      "should set session cookie for returning user")
-
-     ;; Backend: user-id unchanged
-     (check-not-false (user-id-for-email "returning@example.com")
-                      "user-id should still exist"))))
-
-(test-case "github: email matches existing account — shows link confirmation"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   (lambda (token)
-     (values 11111 "linkme" (list "existing@example.com")))
-   (lambda (db)
-     ;; Pre-create an email+password user (no GitHub linked)
-     (register-or-update-user! "existing@example.com" "my-password")
-
-     (define state (generate-csrf-state!))
-     (define result (tester (make-github-callback-request "code" state)
-                            #:raw? #t #:headers? #t))
-     (define body (result-body result))
-
-     ;; Should show the "link account" confirmation page
-     (check-not-false (string-contains? body "existing@example.com")
-                      "should mention the existing email")
-     (check-not-false (string-contains? body "linkme")
-                      "should show the GitHub username")
-     (check-not-false (string-contains? body "Link Account")
-                      "should show the link button")
-
-     ;; Backend: GitHub ID should NOT be linked yet (waiting for password)
-     (check-false (lookup-user-by-github-id 11111)
-                  "GitHub ID should not be linked before password confirmation")
-
-     ;; Step 2: Submit password to complete the link
-     (define form-actions
-       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
-     (check-not-false (pair? form-actions) "should find link form action")
-     (define link-action (strip-to-path (first form-actions)))
-
-     (define link-req
-       (request #"POST"
-                (string->url link-action)
-                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
-                (delay (list (binding:form #"password" #"my-password")))
-                #"password=my-password"
-                "127.0.0.1" 80 "127.0.0.1"))
-     (define link-result (tester link-req #:raw? #t #:headers? #t))
-     (define link-headers (result-headers-str link-result))
-
-     ;; Should set session cookie (login succeeds after linking)
-     (check-not-false (string-contains? link-headers "pltsession=")
-                      "should set session cookie after linking")
-
-     ;; Backend: GitHub ID now linked
-     (check-equal? (lookup-user-by-github-id 11111) "existing@example.com"
-                   "GitHub ID should be linked after password confirmation")
-     (check-equal? (github-username-for-email "existing@example.com") "linkme"
-                   "GitHub username should be stored after linking"))))
-
-(test-case "github: link confirmation fails with wrong password"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   (lambda (token)
-     (values 22222 "badpass-user" (list "wrongpw@example.com")))
-   (lambda (db)
-     (register-or-update-user! "wrongpw@example.com" "correct-password")
-
-     (define state (generate-csrf-state!))
-     (define result (tester (make-github-callback-request "code" state)
-                            #:raw? #t #:headers? #t))
-     (define body (result-body result))
-
-     ;; Find the link form and submit with wrong password
-     (define form-actions
-       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
-     (define link-action (strip-to-path (first form-actions)))
-
-     (define link-req
-       (request #"POST"
-                (string->url link-action)
-                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
-                (delay (list (binding:form #"password" #"wrong-password")))
-                #"password=wrong-password"
-                "127.0.0.1" 80 "127.0.0.1"))
-     (define link-result (tester link-req #:raw? #t #:headers? #t))
-     (define link-body (result-body link-result))
-
-     ;; Should show error, NOT set session cookie
-     (check-not-false (string-contains? link-body "Incorrect password")
-                      "should show incorrect password error")
-     (check-false (string-contains? (result-headers-str link-result) "pltsession=")
-                  "should not set session cookie on wrong password")
-
-     ;; Backend: GitHub ID NOT linked
-     (check-false (lookup-user-by-github-id 22222)
-                  "GitHub ID should not be linked after wrong password"))))
-
-(test-case "github: invalid CSRF state rejected"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   (lambda (token) (values 99999 "csrf-user" (list "csrf@example.com")))
-   (lambda (db)
-     ;; Use a bogus state that was never generated
-     (define result (tester (make-github-callback-request "code" "bogus-state")
-                            #:raw? #t #:headers? #t))
-     (define body (result-body result))
-
-     (check-not-false (string-contains? body "Invalid or expired")
-                      "should show CSRF error")
-
-     ;; Backend: no user created
-     (check-false (user-exists?/email "csrf@example.com")
-                  "no user should be created with invalid CSRF state"))))
-
-(test-case "github: exchange failure shows error"
-  (call-with-github-oauth
-   ;; Mock exchange: returns #f (failure)
-   (lambda (code redirect-uri) #f)
-   (lambda (token) (values #f #f #f))
-   (lambda (db)
-     (define state (generate-csrf-state!))
-     (define result (tester (make-github-callback-request "code" state)
-                            #:raw? #t #:headers? #t))
-
-     (check-not-false (string-contains? (result-body result) "GitHub login failed")
-                      "should show exchange failure error"))))
-
-(test-case "github: no verified emails shows error"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   ;; Mock user-info: valid user but no verified emails
-   (lambda (token) (values 33333 "noemail" '()))
-   (lambda (db)
-     (define state (generate-csrf-state!))
-     (define result (tester (make-github-callback-request "code" state)
-                            #:raw? #t #:headers? #t))
-
-     (check-not-false (string-contains? (result-body result) "No verified email")
-                      "should show no verified email error")
-
-     ;; Backend: no user created
-     (check-false (user-exists?/email "noemail@example.com")
-                  "no user should be created without verified email"))))
-
-(test-case "github: user-info failure shows error"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   ;; Mock user-info: returns failure
-   (lambda (token) (values #f #f #f))
-   (lambda (db)
-     (define state (generate-csrf-state!))
-     (define result (tester (make-github-callback-request "code" state)
-                            #:raw? #t #:headers? #t))
-
-     (check-not-false (string-contains? (result-body result)
-                                        "Could not retrieve your GitHub account")
-                      "should show user-info failure error"))))
-
-(test-case "github: unlink from account page"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) "fake-token")
-   (lambda (token) (values 44444 "unlinkme" (list "unlink@example.com")))
-   (lambda (db)
-     ;; Create user with GitHub linked
-     (register-or-update-user! "unlink@example.com" "pass")
-     (ensure-user-id! "unlink@example.com")
-     (link-github-account! "unlink@example.com" 44444 "unlinkme" "unlink@example.com")
-
-     ;; Verify linked
-     (check-equal? (lookup-user-by-github-id 44444) "unlink@example.com")
-     (check-equal? (github-username-for-email "unlink@example.com") "unlinkme")
-
-     ;; Log in and visit account page
-     (define session-key (create-session! "unlink@example.com"))
-     (define acct-result
-       (tester (make-authenticated-request session-key #:url "/account")
-               #:raw? #t #:headers? #t))
-     (check-equal? (result-status acct-result) 200)
-     (define acct-body (result-body acct-result))
-
-     ;; Should show linked GitHub account and unlink button
-     (check-not-false (string-contains? acct-body "unlinkme")
-                      "should show linked GitHub username")
-     (check-not-false (string-contains? acct-body "Unlink GitHub Account")
-                      "should show unlink button")
-
-     ;; Find and click the unlink form
-     (define unlink-match
-       (regexp-match #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Unlink" acct-body))
-     (check-not-false unlink-match "should find unlink form")
-     (define unlink-url (strip-to-path (cadr unlink-match)))
-
-     (define unlink-req
-       (make-authenticated-request session-key #:method #"POST"
-                                   #:url unlink-url #:post-data #""))
-     (define unlink-result (tester unlink-req #:raw? #t #:headers? #t))
-     (check-equal? (result-status unlink-result) 200)
-     (check-not-false (string-contains? (result-body unlink-result) "GitHub account unlinked")
-                      "should show unlink confirmation")
-
-     ;; Backend: GitHub ID no longer linked
-     (check-false (lookup-user-by-github-id 44444)
-                  "GitHub ID should not be linked after unlinking")
-     (check-false (github-username-for-email "unlink@example.com")
-                  "GitHub username should be cleared after unlinking"))))
-
-(test-case "github: login page shows GitHub button when configured"
-  (call-with-github-oauth
-   (lambda (code redirect-uri) #f)
-   (lambda (token) (values #f #f #f))
-   (lambda (db)
-     (define result (tester "/login" #:raw? #t #:headers? #t))
-     (check-equal? (result-status result) 200)
-     (check-not-false (string-contains? (result-body result) "Sign in with GitHub")
-                      "login page should show GitHub sign-in button when configured"))))
-
-;; --- End-to-end test: account page survives token generation ---
-;; This test catches the bug where user-id-for-email returned a list
-;; instead of a string after a token was generated (due to property
-;; value wrapping in the userdb serialization layer). The account page
-;; would crash with an xexpr contract violation on the second render.
 
 (test-case "e2e: account page renders after token generation"
   (call-with-test-userdb
@@ -856,6 +275,21 @@
                          "account page should still show User ID after token generation")
         (check-not-false (string-contains? body3 "test-ci")
                          "account page should show the new token in the list"))))))
+
+;; --- Authenticated multi-step flows ---
+
+;; Helper: set up test env with a logged-in user, run thunk with session-key
+(define (call-with-logged-in-user email password thunk)
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
+        (initialize-users-for-testing! db (make-registration-state))
+        (set-userdb-for-testing! db)
+        (register-or-update-user! email password)
+        (ensure-user-id! email)
+        (define session-key (create-session! email))
+        (thunk session-key))))))
 
 (test-case "e2e: change password via account page"
   (call-with-logged-in-user "pwchange@example.com" "oldpass"
@@ -1500,3 +934,644 @@
         ;; Should show remaining token(s)
         (check-false (string-contains? acct-final-body "No API tokens")
                      "step 13: should still have tokens after re-login"))))))
+
+;; --- GitHub OAuth integration tests ---
+
+;; Access the persistent config handler so we can set test config values
+(define config-handler (make-persistent-state '*config* (lambda () (hash))))
+
+;; Save the original config to restore after each test
+(define original-config (config-handler))
+
+;; Helper: run thunk with GitHub OAuth configured and mock exchange/user-info functions.
+;; fake-exchange: code redirect-uri -> access-token-or-#f
+;; fake-user-info: access-token -> (values github-id github-username verified-emails)
+(define (call-with-github-oauth fake-exchange fake-user-info thunk)
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
+        (initialize-users-for-testing! db (make-registration-state))
+        (set-userdb-for-testing! db)
+        ;; Enable GitHub OAuth in config
+        (config-handler (hash-set* original-config
+                                    'github-login-client-id "test-client-id"
+                                    'github-login-client-secret "test-client-secret"))
+        (dynamic-wind
+          void
+          (lambda ()
+            (parameterize ([current-github-exchange-code fake-exchange]
+                           [current-github-get-user-info fake-user-info])
+              (thunk db)))
+          (lambda ()
+            (config-handler original-config))))))))
+
+;; Helper: build a GitHub callback request with code and state params
+(define (make-github-callback-request code state)
+  (define qs (if state
+                 (format "code=~a&state=~a" code state)
+                 (format "code=~a" code)))
+  (request #"GET"
+           (string->url (string-append "/auth/github/callback?" qs))
+           '()
+           (delay (list (binding:form (string->bytes/utf-8 "code")
+                                      (string->bytes/utf-8 code))
+                        (binding:form (string->bytes/utf-8 "state")
+                                      (string->bytes/utf-8 (or state "")))))
+           #f
+           "127.0.0.1" 80 "127.0.0.1"))
+
+(test-case "github: new user — creates account and session"
+  (call-with-github-oauth
+   ;; Mock exchange: always return a token
+   (lambda (code redirect-uri) "fake-access-token")
+   ;; Mock user-info: return a new GitHub user
+   (lambda (token)
+     (values 12345 "ghuser" (list "ghuser@example.com")))
+   (lambda (db)
+     ;; Verify: user does not exist yet
+     (check-false (user-exists?/email "ghuser@example.com")
+                  "user should not exist before GitHub login")
+
+     ;; Generate a valid CSRF state
+     (define state (generate-csrf-state!))
+
+     ;; Hit the callback
+     (define result (tester (make-github-callback-request "test-code" state)
+                            #:raw? #t #:headers? #t))
+     (define headers (result-headers-str result))
+
+     ;; Should set a session cookie (successful login)
+     (check-not-false (string-contains? headers "pltsession=")
+                      "should set session cookie for new GitHub user")
+
+     ;; Verify backend: user was created
+     (check-not-false (user-exists?/email "ghuser@example.com")
+                      "user should exist after GitHub login")
+
+     ;; Verify backend: GitHub ID linked
+     (check-equal? (lookup-user-by-github-id 12345) "ghuser@example.com"
+                   "GitHub ID should map to the new user")
+
+     ;; Verify backend: GitHub username stored
+     (check-equal? (github-username-for-email "ghuser@example.com") "ghuser"
+                   "GitHub username should be stored")
+
+     ;; Verify backend: user-id was assigned
+     (check-not-false (user-id-for-email "ghuser@example.com")
+                      "user-id should be assigned on login"))))
+
+(test-case "github: known user — logs in directly"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     (values 67890 "returning-user" (list "returning@example.com")))
+   (lambda (db)
+     ;; Pre-create the user with GitHub ID already linked
+     (register-or-update-user! "returning@example.com" "some-pass")
+     (ensure-user-id! "returning@example.com")
+     (link-github-account! "returning@example.com" 67890 "returning-user"
+                           "returning@example.com")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define headers (result-headers-str result))
+
+     ;; Should set session cookie
+     (check-not-false (string-contains? headers "pltsession=")
+                      "should set session cookie for returning user")
+
+     ;; Backend: user-id unchanged
+     (check-not-false (user-id-for-email "returning@example.com")
+                      "user-id should still exist"))))
+
+(test-case "github: email matches existing account — shows link confirmation"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     (values 11111 "linkme" (list "existing@example.com")))
+   (lambda (db)
+     ;; Pre-create an email+password user (no GitHub linked)
+     (register-or-update-user! "existing@example.com" "my-password")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     ;; Should show the "link account" confirmation page
+     (check-not-false (string-contains? body "existing@example.com")
+                      "should mention the existing email")
+     (check-not-false (string-contains? body "linkme")
+                      "should show the GitHub username")
+     (check-not-false (string-contains? body "Link Account")
+                      "should show the link button")
+
+     ;; Backend: GitHub ID should NOT be linked yet (waiting for password)
+     (check-false (lookup-user-by-github-id 11111)
+                  "GitHub ID should not be linked before password confirmation")
+
+     ;; Step 2: Submit password to complete the link
+     (define form-actions
+       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
+     (check-not-false (pair? form-actions) "should find link form action")
+     (define link-action (strip-to-path (first form-actions)))
+
+     (define link-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"my-password")))
+                #"password=my-password"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define link-result (tester link-req #:raw? #t #:headers? #t))
+     (define link-headers (result-headers-str link-result))
+
+     ;; Should set session cookie (login succeeds after linking)
+     (check-not-false (string-contains? link-headers "pltsession=")
+                      "should set session cookie after linking")
+
+     ;; Backend: GitHub ID now linked
+     (check-equal? (lookup-user-by-github-id 11111) "existing@example.com"
+                   "GitHub ID should be linked after password confirmation")
+     (check-equal? (github-username-for-email "existing@example.com") "linkme"
+                   "GitHub username should be stored after linking"))))
+
+(test-case "github: new user uses primary email, not arbitrary first"
+  ;; github-get-user-info now sorts emails with primary first.
+  ;; The mock bypasses github-get-user-info, so (car verified-emails) is
+  ;; whatever the mock returns first. This test verifies that
+  ;; github-login-complete! uses the first email (the primary after sort).
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     ;; Primary email listed first (as github-get-user-info now does)
+     (values 33333 "multimail"
+             (list "primary@example.com" "secondary@example.com")))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (check-not-false (string-contains? (result-headers-str result) "pltsession=")
+                      "should set session cookie")
+     ;; Account created with primary (first) email
+     (check-not-false (user-exists?/email "primary@example.com")
+                      "account should use primary email")
+     (check-false (user-exists?/email "secondary@example.com")
+                  "secondary email should not be used as account email"))))
+
+(test-case "github: link stores primary github-email"
+  ;; When linking to an existing account, the stored github-email should
+  ;; be the primary GitHub email (first in the list after sorting).
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     ;; Primary email listed first (as github-get-user-info now does);
+     ;; the matching local account is "existing2@example.com" (second)
+     (values 44444 "linker"
+             (list "primary-gh@example.com" "existing2@example.com")))
+   (lambda (db)
+     (register-or-update-user! "existing2@example.com" "my-password")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     ;; Should show link page for existing2@example.com
+     (check-not-false (string-contains? body "existing2@example.com")
+                      "should show existing account email")
+
+     ;; Submit password to link
+     (define form-actions
+       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
+     (define link-action (strip-to-path (first form-actions)))
+     (define link-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"my-password")))
+                #"password=my-password"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (tester link-req #:raw? #t #:headers? #t)
+
+     ;; github-email should be the primary GitHub email (first in list)
+     (define u (lookup-user db "existing2@example.com"))
+     (define stored-gh-email (user-property u 'github-email #f))
+     (check-equal? stored-gh-email "primary-gh@example.com"
+                   "github-email should store primary GitHub email"))))
+
+(test-case "github: link confirmation fails with wrong password"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token)
+     (values 22222 "badpass-user" (list "wrongpw@example.com")))
+   (lambda (db)
+     (register-or-update-user! "wrongpw@example.com" "correct-password")
+
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     ;; Find the link form and submit with wrong password
+     (define form-actions
+       (regexp-match* #rx"action=\"([^\"]+)\"" body #:match-select cadr))
+     (define link-action (strip-to-path (first form-actions)))
+
+     (define link-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"wrong-password")))
+                #"password=wrong-password"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define link-result (tester link-req #:raw? #t #:headers? #t))
+     (define link-body (result-body link-result))
+
+     ;; Should show error, NOT set session cookie
+     (check-not-false (string-contains? link-body "Incorrect password")
+                      "should show incorrect password error")
+     (check-false (string-contains? (result-headers-str link-result) "pltsession=")
+                  "should not set session cookie on wrong password")
+
+     ;; Backend: GitHub ID NOT linked
+     (check-false (lookup-user-by-github-id 22222)
+                  "GitHub ID should not be linked after wrong password"))))
+
+(test-case "github: invalid CSRF state rejected"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token) (values 99999 "csrf-user" (list "csrf@example.com")))
+   (lambda (db)
+     ;; Use a bogus state that was never generated
+     (define result (tester (make-github-callback-request "code" "bogus-state")
+                            #:raw? #t #:headers? #t))
+     (define body (result-body result))
+
+     (check-not-false (string-contains? body "Invalid or expired")
+                      "should show CSRF error")
+
+     ;; Backend: no user created
+     (check-false (user-exists?/email "csrf@example.com")
+                  "no user should be created with invalid CSRF state"))))
+
+(test-case "github: exchange failure shows error"
+  (call-with-github-oauth
+   ;; Mock exchange: returns #f (failure)
+   (lambda (code redirect-uri) #f)
+   (lambda (token) (values #f #f #f))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+
+     (check-not-false (string-contains? (result-body result) "GitHub login failed")
+                      "should show exchange failure error"))))
+
+(test-case "github: no verified emails shows error"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   ;; Mock user-info: valid user but no verified emails
+   (lambda (token) (values 33333 "noemail" '()))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+
+     (check-not-false (string-contains? (result-body result) "No verified email")
+                      "should show no verified email error")
+
+     ;; Backend: no user created
+     (check-false (user-exists?/email "noemail@example.com")
+                  "no user should be created without verified email"))))
+
+(test-case "github: user-info failure shows error"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   ;; Mock user-info: returns failure
+   (lambda (token) (values #f #f #f))
+   (lambda (db)
+     (define state (generate-csrf-state!))
+     (define result (tester (make-github-callback-request "code" state)
+                            #:raw? #t #:headers? #t))
+
+     (check-not-false (string-contains? (result-body result)
+                                        "Could not retrieve your GitHub account")
+                      "should show user-info failure error"))))
+
+(test-case "github: unlink from account page"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) "fake-token")
+   (lambda (token) (values 44444 "unlinkme" (list "unlink@example.com")))
+   (lambda (db)
+     ;; Create user with GitHub linked
+     (register-or-update-user! "unlink@example.com" "pass")
+     (ensure-user-id! "unlink@example.com")
+     (link-github-account! "unlink@example.com" 44444 "unlinkme" "unlink@example.com")
+
+     ;; Verify linked
+     (check-equal? (lookup-user-by-github-id 44444) "unlink@example.com")
+     (check-equal? (github-username-for-email "unlink@example.com") "unlinkme")
+
+     ;; Log in and visit account page
+     (define session-key (create-session! "unlink@example.com"))
+     (define acct-result
+       (tester (make-authenticated-request session-key #:url "/account")
+               #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct-result) 200)
+     (define acct-body (result-body acct-result))
+
+     ;; Should show linked GitHub account and unlink button
+     (check-not-false (string-contains? acct-body "unlinkme")
+                      "should show linked GitHub username")
+     (check-not-false (string-contains? acct-body "Unlink GitHub Account")
+                      "should show unlink button")
+
+     ;; Find and click the unlink form
+     (define unlink-match
+       (regexp-match #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Unlink" acct-body))
+     (check-not-false unlink-match "should find unlink form")
+     (define unlink-url (strip-to-path (cadr unlink-match)))
+
+     (define unlink-req
+       (make-authenticated-request session-key #:method #"POST"
+                                   #:url unlink-url #:post-data #""))
+     (define unlink-result (tester unlink-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status unlink-result) 200)
+     (check-not-false (string-contains? (result-body unlink-result) "GitHub account unlinked")
+                      "should show unlink confirmation")
+
+     ;; Backend: GitHub ID no longer linked
+     (check-false (lookup-user-by-github-id 44444)
+                  "GitHub ID should not be linked after unlinking")
+     (check-false (github-username-for-email "unlink@example.com")
+                  "GitHub username should be cleared after unlinking"))))
+
+(test-case "github: login page shows GitHub button when configured"
+  (call-with-github-oauth
+   (lambda (code redirect-uri) #f)
+   (lambda (token) (values #f #f #f))
+   (lambda (db)
+     (define result (tester "/login" #:raw? #t #:headers? #t))
+     (check-equal? (result-status result) 200)
+     (check-not-false (string-contains? (result-body result) "Sign in with GitHub")
+                      "login page should show GitHub sign-in button when configured"))))
+
+(test-case "github: full multi-step GitHub lifecycle"
+  ;; Mutable mock state: tests update these boxes to control what
+  ;; the mock GitHub API returns at each step.
+  (define mock-token (box "fake-token"))
+  (define mock-github-id (box 55555))
+  (define mock-github-username (box "octocat"))
+  (define mock-emails (box (list "octocat@example.com")))
+
+  (call-with-github-oauth
+   (lambda (code redirect-uri) (unbox mock-token))
+   (lambda (token) (values (unbox mock-github-id)
+                           (unbox mock-github-username)
+                           (unbox mock-emails)))
+   (lambda (db)
+     ;; ===== Step 1: New GitHub user logs in — account auto-created =====
+     (check-false (user-exists?/email "octocat@example.com")
+                  "step 1: user should not exist yet")
+
+     (define state1 (generate-csrf-state!))
+     (define result1 (tester (make-github-callback-request "code1" state1)
+                             #:raw? #t #:headers? #t))
+     (define headers1 (result-headers-str result1))
+     (check-not-false (string-contains? headers1 "pltsession=")
+                      "step 1: should set session cookie")
+
+     ;; Backend: user created with GitHub link
+     (check-not-false (user-exists?/email "octocat@example.com")
+                      "step 1: user should exist")
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 1: GitHub ID should be linked")
+     (check-equal? (github-username-for-email "octocat@example.com") "octocat"
+                   "step 1: GitHub username stored")
+     (define user-id (user-id-for-email "octocat@example.com"))
+     (check-not-false user-id "step 1: user-id should be assigned")
+
+     ;; ===== Step 2: Visit account page — GitHub user with no password =====
+     (define session-key1 (create-session! "octocat@example.com"))
+     (define acct1 (tester (make-authenticated-request session-key1 #:url "/account")
+                           #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct1) 200)
+     (define acct1-body (result-body acct1))
+     (check-not-false (string-contains? acct1-body "octocat")
+                      "step 2: should show GitHub username")
+     (check-not-false (string-contains? acct1-body user-id)
+                      "step 2: should show user-id")
+     ;; No password set, so unlink button should be hidden
+     (check-false (string-contains? acct1-body "Unlink GitHub Account")
+                  "step 2: should NOT show unlink button (no password)")
+     (check-not-false (string-contains? acct1-body "set a password")
+                      "step 2: should show 'set a password' message")
+     (check-not-false (string-contains? acct1-body "Set Password")
+                      "step 2: should show Set Password form")
+     (check-false (has-password? "octocat@example.com")
+                  "step 2: user should not have password yet")
+
+     ;; ===== Step 3: Set a password via account page =====
+     (define acct1-forms
+       (regexp-match* #rx"action=\"([^\"]+)\"" acct1-body #:match-select cadr))
+     ;; Password form is the first form (no unlink form since no password)
+     (define pw-action (strip-to-path (first acct1-forms)))
+     (define pw-req
+       (make-authenticated-request session-key1
+                                   #:method #"POST"
+                                   #:url pw-action
+                                   #:bindings (list (binding:form #"new_password" #"known-pass")
+                                                    (binding:form #"confirm_password" #"known-pass"))
+                                   #:post-data #"new_password=known-pass&confirm_password=known-pass"))
+     (define pw-result (tester pw-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status pw-result) 200)
+     (check-not-false (string-contains? (result-body pw-result) "Password set successfully")
+                      "step 3: should confirm password set")
+
+     ;; Backend: password is now set
+     (check-not-false (has-password? "octocat@example.com")
+                      "step 3: user should now have password")
+     (check-not-false (login-password-correct? "octocat@example.com" "known-pass")
+                      "step 3: new password should work")
+
+     ;; ===== Step 4: Generate an API token =====
+     ;; Re-visit account page to get fresh forms
+     (define acct2 (tester (make-authenticated-request session-key1 #:url "/account")
+                           #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct2) 200)
+     (define acct2-body (result-body acct2))
+     ;; Now should show unlink button (has password)
+     (check-not-false (string-contains? acct2-body "Unlink GitHub Account")
+                      "step 4: should show unlink button now (has password)")
+     (define acct2-forms
+       (regexp-match* #rx"action=\"([^\"]+)\"" acct2-body #:match-select cadr))
+     (define token-action (strip-to-path (last acct2-forms)))
+     (define tok-req
+       (make-authenticated-request session-key1 #:method #"POST"
+                                   #:url token-action
+                                   #:bindings (list (binding:form #"token_label" #"gh-token"))
+                                   #:post-data #"token_label=gh-token"))
+     (define tok-result (tester tok-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status tok-result) 200)
+     (define tok-body (result-body tok-result))
+     (define tok-match (regexp-match #rx"(rpkg_[0-9a-f]+)" tok-body))
+     (check-not-false tok-match "step 4: should show token plaintext")
+     (define token-plaintext (cadr tok-match))
+
+     ;; Backend: token valid
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 4: token should validate")
+     (check-equal? (length (list-api-tokens "octocat@example.com")) 1
+                   "step 4: should have 1 token")
+
+     ;; ===== Step 5: Unlink GitHub from account page =====
+     ;; Navigate back to account page first
+     (define continue-match
+       (regexp-match #rx"href=\"([^\"]+)\">Continue to Account Settings" tok-body))
+     (define continue-url (strip-to-path (cadr continue-match)))
+     (define acct3 (tester (make-authenticated-request session-key1 #:url continue-url)
+                           #:raw? #t #:headers? #t))
+     (check-equal? (result-status acct3) 200)
+     (define acct3-body (result-body acct3))
+
+     ;; Find and click unlink
+     (define unlink-match
+       (regexp-match #rx"action=\"([^\"]+)\"[^>]*>[^<]*<button[^>]*>Unlink" acct3-body))
+     (check-not-false unlink-match "step 5: should find unlink form")
+     (define unlink-url (strip-to-path (cadr unlink-match)))
+     (define unlink-req
+       (make-authenticated-request session-key1 #:method #"POST"
+                                   #:url unlink-url #:post-data #""))
+     (define unlink-result (tester unlink-req #:raw? #t #:headers? #t))
+     (check-equal? (result-status unlink-result) 200)
+     (check-not-false (string-contains? (result-body unlink-result) "GitHub account unlinked")
+                      "step 5: should confirm unlink")
+
+     ;; Backend: GitHub ID unlinked, but user and token still exist
+     (check-false (lookup-user-by-github-id 55555)
+                  "step 5: GitHub ID should be unlinked")
+     (check-false (github-username-for-email "octocat@example.com")
+                  "step 5: GitHub username should be cleared")
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 5: token should still validate after unlink")
+     (check-equal? (user-id-for-email "octocat@example.com") user-id
+                   "step 5: user-id should be unchanged")
+
+     ;; ===== Step 6: Log out =====
+     (destroy-session! session-key1)
+     (check-false (lookup-session/touch! session-key1)
+                  "step 6: session should be destroyed")
+
+     ;; ===== Step 7: GitHub login again — same email, same GitHub ID =====
+     ;; Since the GitHub ID was unlinked but the email still matches an existing
+     ;; user, this should show the link confirmation page.
+     (define state2 (generate-csrf-state!))
+     (define result7 (tester (make-github-callback-request "code2" state2)
+                             #:raw? #t #:headers? #t))
+     (define body7 (result-body result7))
+     (check-not-false (string-contains? body7 "octocat@example.com")
+                      "step 7: should show email on link page")
+     (check-not-false (string-contains? body7 "octocat")
+                      "step 7: should show GitHub username")
+     (check-not-false (string-contains? body7 "Link Account")
+                      "step 7: should show link button")
+
+     ;; Backend: not re-linked yet
+     (check-false (lookup-user-by-github-id 55555)
+                  "step 7: GitHub ID should not be linked yet")
+
+     ;; ===== Step 8: Submit wrong password on link page =====
+     (define link-forms
+       (regexp-match* #rx"action=\"([^\"]+)\"" body7 #:match-select cadr))
+     (define link-action (strip-to-path (first link-forms)))
+     (define wrong-pw-req
+       (request #"POST"
+                (string->url link-action)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"wrong-guess")))
+                #"password=wrong-guess"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define wrong-pw-result (tester wrong-pw-req #:raw? #t #:headers? #t))
+     (define wrong-pw-body (result-body wrong-pw-result))
+     (check-not-false (string-contains? wrong-pw-body "Incorrect password")
+                      "step 8: should show password error")
+     (check-false (lookup-user-by-github-id 55555)
+                  "step 8: GitHub ID still not linked after wrong password")
+
+     ;; ===== Step 9: Submit correct password to re-link =====
+     ;; Re-submit the link form with the correct password (set in step 3).
+     (define link-forms2
+       (regexp-match* #rx"action=\"([^\"]+)\"" wrong-pw-body #:match-select cadr))
+     (define link-action2 (strip-to-path (first link-forms2)))
+     (define correct-pw-req
+       (request #"POST"
+                (string->url link-action2)
+                (list (header #"Content-Type" #"application/x-www-form-urlencoded"))
+                (delay (list (binding:form #"password" #"known-pass")))
+                #"password=known-pass"
+                "127.0.0.1" 80 "127.0.0.1"))
+     (define correct-pw-result (tester correct-pw-req #:raw? #t #:headers? #t))
+     (define correct-pw-headers (result-headers-str correct-pw-result))
+     (check-not-false (string-contains? correct-pw-headers "pltsession=")
+                      "step 9: should set session cookie after linking")
+
+     ;; Backend: GitHub re-linked
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 9: GitHub ID should be re-linked")
+     (check-equal? (github-username-for-email "octocat@example.com") "octocat"
+                   "step 9: GitHub username should be restored")
+
+     ;; ===== Step 10: Second GitHub user logs in — different account =====
+     (set-box! mock-github-id 77777)
+     (set-box! mock-github-username "contributor")
+     (set-box! mock-emails (list "contributor@example.com"))
+
+     (define state3 (generate-csrf-state!))
+     (define result10 (tester (make-github-callback-request "code3" state3)
+                              #:raw? #t #:headers? #t))
+     (check-not-false (string-contains? (result-headers-str result10) "pltsession=")
+                      "step 10: should set session cookie for new user")
+
+     ;; Backend: second user created independently
+     (check-not-false (user-exists?/email "contributor@example.com")
+                      "step 10: second user should exist")
+     (check-equal? (lookup-user-by-github-id 77777) "contributor@example.com"
+                   "step 10: second GitHub ID linked")
+     (check-equal? (github-username-for-email "contributor@example.com") "contributor"
+                   "step 10: second GitHub username stored")
+     (define user-id2 (user-id-for-email "contributor@example.com"))
+     (check-not-false user-id2 "step 10: second user should have user-id")
+     (check-not-equal? user-id user-id2
+                       "step 10: user-ids should be different")
+
+     ;; First user's state is unaffected
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 10: first user's GitHub link should be intact")
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 10: first user's token should still work")
+     (check-equal? (user-id-for-email "octocat@example.com") user-id
+                   "step 10: first user's user-id unchanged")
+
+     ;; ===== Step 11: First user logs in again via GitHub (already linked) =====
+     (set-box! mock-github-id 55555)
+     (set-box! mock-github-username "octocat")
+     (set-box! mock-emails (list "octocat@example.com"))
+
+     (define state4 (generate-csrf-state!))
+     (define result11 (tester (make-github-callback-request "code4" state4)
+                              #:raw? #t #:headers? #t))
+     (check-not-false (string-contains? (result-headers-str result11) "pltsession=")
+                      "step 11: should log in directly via linked GitHub ID")
+
+     ;; Backend: everything still intact
+     (check-equal? (lookup-user-by-github-id 55555) "octocat@example.com"
+                   "step 11: GitHub link intact")
+     (check-equal? (user-id-for-email "octocat@example.com") user-id
+                   "step 11: user-id unchanged")
+     (check-not-false (login-password-correct? "octocat@example.com" "known-pass")
+                      "step 11: password still works")
+     (check-equal? (validate-api-token token-plaintext) "octocat@example.com"
+                   "step 11: token still works"))))
