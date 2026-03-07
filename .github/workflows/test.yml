@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [ "auth/*" ]
+    branches: [ "auth/*", "restructure/*" ]
   pull_request:
     branches: [ master ]
   workflow_dispatch:
