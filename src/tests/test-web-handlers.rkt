@@ -163,7 +163,14 @@
   (define result (tester "/json/search-completions" #:raw? #t #:headers? #t))
   (check-not-false (string-contains? (result-headers-str result) "Access-Control-Allow-Origin")))
 
-
+;; Helper: make a request struct with a signed session cookie
+(define (make-authenticated-request session-key
+                                    #:method [method #"GET"]
+                                    #:url [url-string "/"]
+                                    #:bindings [bindings '()]
+                                    #:post-data [post-data #f])
+  (define id-cookie (make-id-cookie "pltsession" #:key (session-signing-key) session-key))
+  (define set-cookie-str (bytes->string/utf-8 (header-value (cookie->header id-cookie))))
   (define cookie-val (cadr (regexp-match #rx"pltsession=([^;]+)" set-cookie-str)))
   (define cookie-header
     (header #"Cookie"
@@ -183,6 +190,14 @@
   (define u (string->url url-str))
   (url->string (struct-copy url u [scheme #f] [host #f] [port #f] [user #f])))
 
+;; --- Authenticated multi-step flows ---
+
+;; Helper: set up test env with a logged-in user, run thunk with session-key
+(define (call-with-logged-in-user email password thunk)
+  (call-with-test-userdb
+   (lambda (db)
+     (call-with-test-packages-dir
+      (lambda (pkgs-dir)
         (initialize-users-for-testing! db (make-registration-state))
         (set-userdb-for-testing! db)
         (register-or-update-user! email password)
