@@ -472,7 +472,7 @@
                          ,(form-group 5 5 (primary-button
                                            (if user-has-password
                                                "Change Password"
-                                               "Set Password")))))
+                                               "Set Password")))))))
          ,(token-management-panel email embed-url)))))))
 
 (define (token-management-panel email embed-url)
