@@ -849,21 +849,6 @@
         (check-not-false (string-contains? body3 "test-ci")
                          "account page should show the new token in the list"))))))
 
-;; --- Authenticated multi-step flows ---
-
-;; Helper: set up test env with a logged-in user, run thunk with session-key
-(define (call-with-logged-in-user email password thunk)
-  (call-with-test-userdb
-   (lambda (db)
-     (call-with-test-packages-dir
-      (lambda (pkgs-dir)
-        (initialize-users-for-testing! db (make-registration-state))
-        (set-userdb-for-testing! db)
-        (register-or-update-user! email password)
-        (ensure-user-id! email)
-        (define session-key (create-session! email))
-        (thunk session-key))))))
-
 (test-case "e2e: change password via account page"
   (call-with-logged-in-user "pwchange@example.com" "oldpass"
     (lambda (session-key)
