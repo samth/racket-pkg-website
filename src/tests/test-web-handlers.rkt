@@ -20,6 +20,8 @@
          web-server/http/cookie
          web-server/http/request-structs
          web-server/http/cookie-parse
+         web-server/servlet-dispatch
+         web-server/managers/lru
          infrastructure-userdb
          "../site.rkt"
          "../sessions.rkt"
@@ -47,8 +49,14 @@
 (define (result-headers-str result)
   (bytes->string/utf-8 (car result)))
 
-;; Create the tester from request-handler
-(define tester (make-servlet-tester request-handler))
+;; Create the tester from request-handler.
+;; Use a 512MB threshold to avoid LRU eviction during tests
+;; (the default 64MB threshold can cause "Page Has Expired" errors
+;; when many tests create continuations via send/suspend/dispatch).
+(define tester
+  (make-dispatcher-tester
+   (dispatch/servlet request-handler
+                      #:manager (make-threshold-LRU-manager #f (* 512 1024 1024)))))
 
 (test-case "handler: main page redirects to static index"
   (define result (tester "/" #:raw? #t #:headers? #t))
